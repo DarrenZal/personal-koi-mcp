@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Contract test (query_code_graph query_type enum ↔ backend)
+        run: npm run test:contract
+        env:
+          KOI_API_ENDPOINT: ${{ vars.KOI_API_ENDPOINT }}
+          KOI_USER_EMAIL: contract-test@github
+
+      - name: Verify build artifacts
+        run: |
+          test -f dist/index.js
+          echo "Build successful!"
