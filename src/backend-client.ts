@@ -61,7 +61,8 @@ export interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   mode: string;
   database: string;
-  bge_available?: boolean;
+  openai_available?: boolean;
+  embedding_model?: string | null;
   semantic_matching?: boolean;
   resolution_tiers?: {
     tier1_exact: boolean;
