@@ -61,6 +61,14 @@ export interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   mode: string;
   database: string;
+  bge_available?: boolean;
+  semantic_matching?: boolean;
+  resolution_tiers?: {
+    tier1_exact: boolean;
+    tier1x_fuzzy: boolean;
+    tier2_semantic: boolean;
+    tier3_create: boolean;
+  };
   error?: string;
 }
 
