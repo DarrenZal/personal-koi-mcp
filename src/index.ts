@@ -465,6 +465,12 @@ class KOIServer {
           case 'get_session_stats':
             result = await this.getSessionStats();
             break;
+          case 'search_sessions_by_tool':
+            result = await this.searchSessionsByTool(args as { tool?: string; mcp_server?: string; limit?: number });
+            break;
+          case 'search_sessions_by_files':
+            result = await this.searchSessionsByFiles(args as { path_contains?: string; limit?: number });
+            break;
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -5400,6 +5406,191 @@ Your feedback helps improve KOI for everyone.${
         content: [{
           type: 'text',
           text: `Error getting session stats: ${errorMessage}\n\nMake sure the personal KOI backend is running on port 8351.`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Search sessions by tool or MCP server usage.
+   */
+  private async searchSessionsByTool(args: { tool?: string; mcp_server?: string; limit?: number }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const { tool, mcp_server, limit = 20 } = args;
+
+    try {
+      const backendUrl = process.env.KOI_BACKEND_URL || 'http://localhost:8351';
+      const params = new URLSearchParams();
+      if (tool) params.append('tool', tool);
+      if (mcp_server) params.append('mcp_server', mcp_server);
+      params.append('limit', limit.toString());
+
+      const response = await fetch(`${backendUrl}/session-tools?${params}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          content: [{
+            type: 'text',
+            text: `Error searching sessions by tool: ${response.status} - ${errorText}`
+          }]
+        };
+      }
+
+      interface ToolResult {
+        session_id: string;
+        tool_name: string;
+        call_count: number;
+        mcp_server?: string;
+        summary?: string;
+        first_prompt?: string;
+        last_ingested_at?: string;
+      }
+
+      interface ToolStat {
+        tool_name: string;
+        total_calls: number;
+        session_count: number;
+        is_mcp: boolean;
+        mcp_server?: string;
+      }
+
+      const data = await response.json() as {
+        results?: ToolResult[];
+        tool_stats?: ToolStat[];
+        count?: number;
+        filter?: { tool?: string; mcp_server?: string };
+        message?: string;
+      };
+
+      if (data.message) {
+        return {
+          content: [{
+            type: 'text',
+            text: `# Session Tool Usage\n\n${data.message}`
+          }]
+        };
+      }
+
+      let output = '';
+
+      if (data.tool_stats) {
+        // Overall stats
+        output = `# Tool Usage Statistics\n\n`;
+        output += `| Tool | Total Calls | Sessions | MCP Server |\n`;
+        output += `|------|-------------|----------|------------|\n`;
+        for (const stat of data.tool_stats) {
+          output += `| ${stat.tool_name} | ${stat.total_calls} | ${stat.session_count} | ${stat.mcp_server || '-'} |\n`;
+        }
+      } else if (data.results) {
+        // Filtered results
+        const filterDesc = tool ? `tool "${tool}"` : `MCP server "${mcp_server}"`;
+        output = `# Sessions using ${filterDesc}\n\n`;
+        output += `Found ${data.count} matches:\n\n`;
+
+        for (const result of data.results) {
+          const date = result.last_ingested_at ? new Date(result.last_ingested_at).toLocaleDateString() : 'Unknown';
+          output += `---\n\n`;
+          output += `## ${result.summary || 'Untitled'}\n`;
+          output += `**Date**: ${date} | **${result.tool_name}**: ${result.call_count} calls\n`;
+          output += `**Session ID**: \`${result.session_id}\`\n\n`;
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error searching sessions by tool: ${errorMessage}\n\nMake sure the personal KOI backend is running.`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Search sessions by files accessed.
+   */
+  private async searchSessionsByFiles(args: { path_contains?: string; limit?: number }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const { path_contains, limit = 20 } = args;
+
+    try {
+      const backendUrl = process.env.KOI_BACKEND_URL || 'http://localhost:8351';
+      const params = new URLSearchParams();
+      if (path_contains) params.append('path_contains', path_contains);
+      params.append('limit', limit.toString());
+
+      const response = await fetch(`${backendUrl}/session-files?${params}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          content: [{
+            type: 'text',
+            text: `Error searching sessions by files: ${response.status} - ${errorText}`
+          }]
+        };
+      }
+
+      interface FileResult {
+        session_id: string;
+        summary?: string;
+        first_prompt?: string;
+        files_accessed: string[];
+        file_count: number;
+        last_ingested_at?: string;
+      }
+
+      const data = await response.json() as {
+        results: FileResult[];
+        count: number;
+        filter: { path_contains?: string };
+      };
+
+      let output = '';
+      if (path_contains) {
+        output = `# Sessions accessing files matching "${path_contains}"\n\n`;
+      } else {
+        output = `# Sessions with Most Files Accessed\n\n`;
+      }
+      output += `Found ${data.count} sessions:\n\n`;
+
+      for (const result of data.results) {
+        const date = result.last_ingested_at ? new Date(result.last_ingested_at).toLocaleDateString() : 'Unknown';
+        output += `---\n\n`;
+        output += `## ${result.summary || 'Untitled'}\n`;
+        output += `**Date**: ${date} | **Files**: ${result.file_count}\n`;
+        output += `**Session ID**: \`${result.session_id}\`\n\n`;
+
+        if (result.files_accessed && result.files_accessed.length > 0) {
+          output += `**Sample files:**\n`;
+          for (const file of result.files_accessed.slice(0, 5)) {
+            output += `- \`${file}\`\n`;
+          }
+          if (result.files_accessed.length > 5) {
+            output += `- ... and ${result.files_accessed.length - 5} more\n`;
+          }
+        }
+        output += '\n';
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error searching sessions by files: ${errorMessage}\n\nMake sure the personal KOI backend is running.`
         }]
       };
     }

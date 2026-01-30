@@ -1285,5 +1285,71 @@ Shows how many sessions have been indexed and their metadata.
       type: 'object',
       properties: {}
     }
+  },
+  {
+    name: 'search_sessions_by_tool',
+    description: `Find sessions by tool or MCP server usage.
+
+Search for sessions where specific tools were used.
+
+**Use cases:**
+- "Sessions where I used the Regen ledger MCP"
+- "Sessions with heavy Bash usage"
+- "Which sessions used the commit skill"
+
+**Example:**
+  search_sessions_by_tool(tool="Bash")
+  search_sessions_by_tool(mcp_server="personal-koi")
+
+**Without filters:** Returns overall tool usage statistics across all sessions.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tool: {
+          type: 'string',
+          description: 'Tool name to search for (e.g., "Bash", "Read", "Edit")'
+        },
+        mcp_server: {
+          type: 'string',
+          description: 'MCP server name to filter by (e.g., "personal-koi", "regen-ledger")'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default: 20)',
+          default: 20
+        }
+      }
+    }
+  },
+  {
+    name: 'search_sessions_by_files',
+    description: `Find sessions by files accessed.
+
+Search for sessions that read/edited/wrote specific files.
+
+**Use cases:**
+- "Sessions that edited koi-processor files"
+- "Sessions working on the MCP server"
+- "When did I last work on the sensor?"
+
+**Example:**
+  search_sessions_by_files(path_contains="koi-processor")
+  search_sessions_by_files(path_contains="claude_session_sensor")
+
+**Without filters:** Returns sessions with most files accessed.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path_contains: {
+          type: 'string',
+          description: 'File path substring to search for (e.g., "koi-processor", "sensor")'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default: 20)',
+          default: 20
+        }
+      }
+    }
   }
 ];
