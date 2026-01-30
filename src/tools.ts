@@ -212,7 +212,9 @@ NOT for live blockchain queries - use Ledger MCP for on-chain state.`,
   },
   {
     name: 'resolve_entity',
-    description: 'Resolve an ambiguous label to a canonical KOI entity. Returns ranked matches with URIs, types, and confidence scores. Use this when you have a label (like "ethereum" or "regen commons") and need to find the exact entity in the knowledge graph.',
+    description: `Resolve an ambiguous label to a canonical KOI entity. Returns ranked matches with URIs, types, and confidence scores. Use this when you have a label (like "ethereum" or "regen commons") and need to find the exact entity in the knowledge graph.
+
+**Context-aware resolution:** For Organizations, you can provide associated_people to improve disambiguation. If "Biocene Labs" appears with "Shawn Anderson" and "Darren Zal", it may resolve to "Symbiocene Labs" based on document co-occurrence.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -230,6 +232,26 @@ NOT for live blockchain queries - use Ledger MCP for on-chain state.`,
           minimum: 1,
           maximum: 20,
           default: 5
+        },
+        context: {
+          type: 'object',
+          description: 'Disambiguation context from surrounding text. Enables Tier 1.5 contextual matching for Organizations.',
+          properties: {
+            associated_people: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'People mentioned alongside this entity (e.g., ["Shawn Anderson", "Darren Zal"]). Requires ≥2 people for contextual matching.'
+            },
+            associated_orgs: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Organizations mentioned alongside this entity (reserved for future use)'
+            },
+            source_text: {
+              type: 'string',
+              description: 'The sentence or paragraph containing the entity (reserved for future use)'
+            }
+          }
         }
       },
       required: ['label']
@@ -566,6 +588,11 @@ Example:
           type: 'object',
           description: 'Optional YAML frontmatter as JSON object',
           additionalProperties: true
+        },
+        backup: {
+          type: 'boolean',
+          description: 'Commit vault to git before making changes (default: true)',
+          default: true
         }
       },
       required: ['path', 'content']
@@ -983,9 +1010,280 @@ If backend is unavailable, falls back to vault-only resolution.`,
           type: 'boolean',
           description: 'If backend unavailable, use vault-only resolution (default: true)',
           default: true
+        },
+        context: {
+          type: 'object',
+          description: 'Optional meeting context for better entity resolution (helps disambiguate names like "Sean" vs "Shawn Anderson")',
+          properties: {
+            project: {
+              type: 'string',
+              description: 'Project name (e.g., "GLOTCHA") - finds people from related meetings'
+            },
+            attendees: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Known attendees - finds other people they have met with'
+            },
+            topics: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Topics/concepts discussed - finds people from meetings on similar topics'
+            }
+          }
         }
       },
       required: ['path', 'entities']
+    }
+  },
+  // =============================================================================
+  // VAULT ENTITY REGISTRATION TOOLS - Sync vault entities with KOI backend
+  // =============================================================================
+  {
+    name: 'vault_register_entity',
+    description: `Register a vault entity note (People, Organizations, etc.) with the KOI backend.
+
+This tool registers an existing vault entity note with the backend for:
+1. **Deduplication** - Checks if entity already exists in the knowledge base
+2. **Canonical URI** - Assigns a stable URI that survives file renames
+3. **RID Mapping** - Links the vault RID to the canonical entity
+4. **Frontmatter Update** - Optionally adds koi: metadata to the note
+
+**When to use:**
+- After creating a new Person, Organization, or Project note
+- To link vault entities with the backend knowledge base
+- Before using /process-note to ensure entities are registered
+
+**Example:**
+  vault_register_entity(path="People/Clare Attwell.md")
+
+**Returns:**
+  {
+    success: true,
+    rid: "orn:obsidian.entity:Notes/Person/clare-attwell",
+    canonical_uri: "orn:personal-koi.entity:person-clare-attwell-abc123",
+    is_new: false,
+    updated_frontmatter: true
+  }
+
+**Note:** Requires personal KOI backend running on port 8351.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to the entity note (e.g., "People/Clare Attwell.md")'
+        },
+        update_frontmatter: {
+          type: 'boolean',
+          description: 'Update the note with koi: metadata (default: true)',
+          default: true
+        },
+        backup: {
+          type: 'boolean',
+          description: 'Commit vault to git before making changes (default: true)',
+          default: true
+        }
+      },
+      required: ['path']
+    }
+  },
+  {
+    name: 'vault_sync_entities',
+    description: `Bulk register all entity notes from specified folders with the KOI backend.
+
+This tool scans entity folders (People, Organizations, Projects, etc.) and
+registers all notes with the backend for deduplication and canonical URI assignment.
+
+**Modes:**
+- \`register_new\` - Only register entities not already in backend (default)
+- \`full_sync\` - Re-register all entities, updating if changed
+- \`sync_changed\` - Only sync entities with pending changes (most efficient for incremental updates)
+
+**Example:**
+  vault_sync_entities(folders=["People", "Organizations"])
+
+**Returns:**
+  {
+    registered: 15,
+    updated: 3,
+    skipped: 42,
+    errors: 0,
+    by_type: { Person: 10, Organization: 8 }
+  }
+
+**Note:** Requires personal KOI backend running on port 8351.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        folders: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Folders to scan (default: ["People", "Organizations", "Projects", "Locations", "Concepts"])'
+        },
+        mode: {
+          type: 'string',
+          enum: ['register_new', 'full_sync', 'sync_changed'],
+          description: 'Sync mode: register_new (only unregistered), full_sync (all entities), sync_changed (only entities with pending changes)',
+          default: 'register_new'
+        },
+        update_frontmatter: {
+          type: 'boolean',
+          description: 'Update notes with koi: metadata (default: true)',
+          default: true
+        },
+        backup: {
+          type: 'boolean',
+          description: 'Commit vault to git before making changes (default: true). Only applies when update_frontmatter is true.',
+          default: true
+        }
+      }
+    }
+  },
+  {
+    name: 'vault_check_sync_status',
+    description: `Check sync status between vault entities and the KOI backend.
+
+Shows which vault entities are:
+- \`linked\` - Synced with backend, content unchanged
+- \`local_only\` - Exists in vault but not registered in backend
+- \`pending_sync\` - Registered but content has changed
+- \`conflict\` - Local and backend have diverged
+
+**Example:**
+  vault_check_sync_status(folder="People")
+
+**Returns:**
+  {
+    total: 50,
+    linked: 42,
+    local_only: 5,
+    pending_sync: 3,
+    conflict: 0,
+    entities: [
+      { path: "People/Clare Attwell.md", status: "linked", canonical_uri: "..." },
+      { path: "People/New Person.md", status: "local_only" }
+    ]
+  }`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        folder: {
+          type: 'string',
+          description: 'Folder to check (e.g., "People"). If omitted, checks all entity folders.'
+        }
+      }
+    }
+  },
+  // =============================================================================
+  // ENTITY SCHEMA TOOLS - Dynamic entity type configuration
+  // =============================================================================
+  {
+    name: 'list_entity_types',
+    description: `List available entity types and their resolution configuration.
+
+This tool returns the dynamically loaded entity type schemas from the backend.
+Use this to discover available entity types instead of hardcoding type names.
+
+**Returns:**
+- Type key (e.g., "Person", "Organization", "Project")
+- Vault folder mapping (e.g., "People", "Organizations", "Projects")
+- Phonetic matching enabled (for transcription typo handling)
+- Resolution thresholds (min_context_people, similarity_threshold)
+
+**When to use:**
+- Before entity extraction to know available types
+- To check if phonetic matching is enabled for a type
+- To understand entity type configuration
+
+**Example response:**
+| Type | Folder | Phonetic | Min Context | Similarity |
+|------|--------|----------|-------------|------------|
+| Person | People | ✓ | 1 | 0.92 |
+| Organization | Organizations | ✓ | 2 | 0.85 |
+| Project | Projects | ✓ | 2 | 0.85 |`,
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  // =============================================================================
+  // SESSION SEARCH TOOLS - Search Claude Code conversation history
+  // =============================================================================
+  {
+    name: 'search_sessions',
+    description: `Search your Claude Code session history.
+
+Performs semantic search over indexed Claude Code conversation transcripts.
+Use this to find past discussions, solutions, or context from previous sessions.
+
+**Features:**
+- Semantic search (when embeddings available) or text search (fallback)
+- Returns matching conversation chunks with session context
+- Includes session metadata (summary, first prompt, date)
+
+**Use cases:**
+- "What did we discuss about entity resolution?"
+- "Find sessions where I worked on the KOI processor"
+- "When did I last debug the pgvector setup?"
+
+**Example:**
+  search_sessions(query="entity resolution pgvector", limit=5)
+
+**Returns:**
+  {
+    results: [
+      {
+        session_id: "abc123",
+        chunk_text: "User: How do I set up entity resolution?\\n\\nAssistant: ...",
+        similarity: 0.85,
+        summary: "KOI entity resolution setup",
+        timestamp: "2026-01-15T10:30:00"
+      }
+    ],
+    count: 5,
+    search_type: "semantic"
+  }
+
+**Note:** Requires session sensor to have indexed sessions first.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (e.g., "pgvector setup", "entity deduplication")'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results to return (default: 10)',
+          default: 10,
+          minimum: 1,
+          maximum: 50
+        },
+        session_id: {
+          type: 'string',
+          description: 'Optional: filter to a specific session ID'
+        }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'get_session_stats',
+    description: `Get statistics about indexed Claude Code sessions.
+
+Shows how many sessions have been indexed and their metadata.
+
+**Returns:**
+- Total sessions indexed
+- Total conversation chunks
+- Embedding coverage percentage
+- Recent sessions list
+
+**Example:**
+  get_session_stats()`,
+    inputSchema: {
+      type: 'object',
+      properties: {}
     }
   }
 ];

@@ -44,9 +44,95 @@ import { createResolver } from './entity-resolver.js';
 import { createProcessor } from './document-processor.js';
 // Backend client for personal KOI-processor
 import { getBackendClient, BackendClient } from './backend-client.js';
+// Entity schema loader (for schema-driven entity types)
+import { prefetchEntityTypes, getEntityTypes, getSchemaVersion } from './entity-schema.js';
+// Child process for git commands
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // Load environment variables
 dotenv.config();
+
+// =============================================================================
+// Vault Backup
+// =============================================================================
+
+interface BackupResult {
+  success: boolean;
+  message: string;
+  commitHash?: string;
+  skipped?: boolean;
+}
+
+/**
+ * Backup the vault by committing current state to git.
+ * Only commits if there are uncommitted changes.
+ *
+ * @param reason - Reason for the backup (included in commit message)
+ * @returns BackupResult with success status and details
+ */
+async function backupVault(reason: string = 'KOI sync'): Promise<BackupResult> {
+  const vaultPath = vault.getVaultPath();
+
+  try {
+    // Check if vault is a git repo
+    try {
+      await execAsync('git rev-parse --is-inside-work-tree', { cwd: vaultPath });
+    } catch {
+      return {
+        success: false,
+        message: 'Vault is not a git repository',
+        skipped: true
+      };
+    }
+
+    // Check for uncommitted changes
+    const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: vaultPath });
+
+    if (!statusOutput.trim()) {
+      return {
+        success: true,
+        message: 'No uncommitted changes to backup',
+        skipped: true
+      };
+    }
+
+    // Stage all changes
+    await execAsync('git add .', { cwd: vaultPath });
+
+    // Commit with timestamp
+    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const commitMessage = `KOI backup before ${reason} [${timestamp}]`;
+
+    const { stdout: commitOutput } = await execAsync(
+      `git commit -m "${commitMessage}"`,
+      { cwd: vaultPath }
+    );
+
+    // Extract commit hash from output
+    const hashMatch = commitOutput.match(/\[[\w-]+ ([a-f0-9]+)\]/);
+    const commitHash = hashMatch ? hashMatch[1] : undefined;
+
+    logger.info(`Vault backup created: ${commitHash || 'unknown'}`);
+
+    return {
+      success: true,
+      message: `Backup committed: ${commitMessage}`,
+      commitHash
+    };
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error(`Vault backup failed: ${errorMessage}`);
+
+    return {
+      success: false,
+      message: `Backup failed: ${errorMessage}`
+    };
+  }
+}
 
 // Configuration
 const KOI_API_ENDPOINT = process.env.KOI_API_ENDPOINT || 'https://regen.gaiaai.xyz/api/koi';
@@ -180,6 +266,15 @@ class KOIServer {
       api_key_configured: !!KOI_API_KEY,
       graph_db_configured: !!(process.env.GRAPH_DB_HOST && process.env.GRAPH_DB_NAME)
     }, `Starting Regen KOI MCP Server v${SERVER_VERSION}`);
+
+    // Prefetch entity types from backend (async, non-blocking)
+    prefetchEntityTypes()
+      .then(() => {
+        logger.info({ action: 'entity_types_loaded' }, 'Entity types prefetched from backend');
+      })
+      .catch((err) => {
+        logger.warn({ action: 'entity_types_load_failed', error: err.message }, 'Using default entity types');
+      });
   }
 
   private setupHandlers() {
@@ -303,7 +398,7 @@ class KOIServer {
             result = await this.vaultReadNote(args as { path: string });
             break;
           case 'vault_write_note':
-            result = await this.vaultWriteNote(args as { path: string; content: string; frontmatter?: Record<string, any> });
+            result = await this.vaultWriteNote(args as { path: string; content: string; frontmatter?: Record<string, any>; backup?: boolean });
             break;
           case 'vault_list_notes':
             result = await this.vaultListNotes(args as { folder?: string; entityType?: string; limit?: number });
@@ -338,7 +433,37 @@ class KOIServer {
               entities: Array<{ name: string; type: string; mentions?: string[]; confidence?: number; context?: string }>;
               relationships?: Array<{ subject: string; predicate: string; object: string }>;
               fallbackToVault?: boolean;
+              context?: { project?: string; attendees?: string[]; topics?: string[] };
             });
+            break;
+          case 'vault_register_entity':
+            result = await this.vaultRegisterEntity(args as {
+              path: string;
+              update_frontmatter?: boolean;
+              backup?: boolean;
+            });
+            break;
+          case 'vault_sync_entities':
+            result = await this.vaultSyncEntities(args as {
+              folders?: string[];
+              mode?: 'register_new' | 'full_sync' | 'sync_changed';
+              update_frontmatter?: boolean;
+              backup?: boolean;
+            });
+            break;
+          case 'vault_check_sync_status':
+            result = await this.vaultCheckSyncStatus(args as {
+              folder?: string;
+            });
+            break;
+          case 'list_entity_types':
+            result = await this.listEntityTypes();
+            break;
+          case 'search_sessions':
+            result = await this.searchSessions(args as { query: string; limit?: number; session_id?: string });
+            break;
+          case 'get_session_stats':
+            result = await this.getSessionStats();
             break;
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -2434,10 +2559,10 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
   /**
    * Resolve an ambiguous label to canonical KOI entities
-   * Calls GET /entity/resolve
+   * Calls POST /entity/resolve with JSON body (supports context for disambiguation)
    */
   private async resolveEntity(args: any) {
-    const { label, type_hint, limit = 5 } = args || {};
+    const { label, type_hint, limit = 5, context } = args || {};
 
     if (!label) {
       return {
@@ -2449,13 +2574,17 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
     }
 
     const startTime = Date.now();
-    console.error(`[${SERVER_NAME}] Tool=resolve_entity Label="${label}" TypeHint=${type_hint || 'none'}`);
+    const hasContext = context && context.associated_people && context.associated_people.length >= 2;
+    console.error(`[${SERVER_NAME}] Tool=resolve_entity Label="${label}" TypeHint=${type_hint || 'none'} Context=${hasContext ? 'yes' : 'no'}`);
 
     try {
-      const params: any = { label, limit };
-      if (type_hint) params.type_hint = type_hint;
+      // Build request body for POST
+      const body: any = { label, limit };
+      if (type_hint) body.type_hint = type_hint;
+      if (context) body.context = context;  // Pass context object directly
 
-      const response = await apiClient.get('/entity/resolve', { params });
+      // Use POST to properly pass nested context object
+      const response = await apiClient.post('/entity/resolve', body);
       const data = response.data as any;
 
       // Normalize candidates from various API response formats
@@ -3576,15 +3705,27 @@ Your feedback helps improve KOI for everyone.${
     path: string;
     content: string;
     frontmatter?: Record<string, any>;
+    backup?: boolean;
   }): Promise<{ content: Array<{ type: string; text: string }> }> {
     try {
+      // Backup vault before making changes (default: true)
+      let backupInfo = '';
+      if (args.backup !== false) {
+        const backupResult = await backupVault(`write ${args.path}`);
+        if (backupResult.success && !backupResult.skipped) {
+          backupInfo = ` (backup: ${backupResult.commitHash || 'committed'})`;
+        } else if (!backupResult.success && !backupResult.skipped) {
+          logger.warn(`Backup failed before writing ${args.path}: ${backupResult.message}`);
+        }
+      }
+
       const result = await vault.writeNote(args.path, args.content, args.frontmatter);
 
       if (result.success) {
         return {
           content: [{
             type: 'text',
-            text: `Note written successfully: ${result.path}`
+            text: `Note written successfully: ${result.path}${backupInfo}`
           }]
         };
       } else {
@@ -4305,6 +4446,11 @@ Your feedback helps improve KOI for everyone.${
       object: string;
     }>;
     fallbackToVault?: boolean;
+    context?: {
+      project?: string;
+      attendees?: string[];
+      topics?: string[];
+    };
   }): Promise<{ content: Array<{ type: string; text: string }> }> {
     const fallbackToVault = args.fallbackToVault ?? true;
     const vaultPath = vault.getVaultPath();
@@ -4320,6 +4466,83 @@ Your feedback helps improve KOI for everyone.${
         // Send to backend for deduplication and storage
         const documentRid = BackendClient.pathToRid(vaultPath, args.path);
 
+        // Get contextual candidates if context provided
+        let contextualCandidates: Array<{
+          name: string;
+          uri: string;
+          normalized_name: string;
+          source_documents: string[];
+          vault_path?: string;
+        }> = [];
+        let nameExpansions: Map<string, { fullName: string; confidence: string; source: string }> = new Map();
+
+        if (args.context && (args.context.project || args.context.attendees?.length || args.context.topics?.length)) {
+          const candidateResponse = await backendClient.getContextualCandidates({
+            project: args.context.project,
+            attendees: args.context.attendees,
+            topics: args.context.topics,
+            documentRid: documentRid,
+          });
+          contextualCandidates = candidateResponse.candidates;
+
+          // Build name expansion map for ambiguous names
+          // An ambiguous name is a single word (no space) that might match a full name
+          for (const candidate of contextualCandidates) {
+            const nameParts = candidate.name.toLowerCase().split(' ');
+            // For each part of the full name, create a potential expansion
+            for (const part of nameParts) {
+              if (part.length >= 3) { // Skip very short parts
+                const existing = nameExpansions.get(part);
+                const source = candidate.source_documents.length > 0
+                  ? `from ${candidate.source_documents.length} related meeting(s)`
+                  : candidate.vault_path
+                    ? `from vault: ${candidate.vault_path}`
+                    : 'from knowledge base';
+                // Only store if no existing or this has more evidence
+                if (!existing || candidate.source_documents.length > 0) {
+                  nameExpansions.set(part, {
+                    fullName: candidate.name,
+                    confidence: candidate.source_documents.length > 0 ? 'high' : 'medium',
+                    source
+                  });
+                }
+              }
+            }
+          }
+
+          logger.info(`Loaded ${contextualCandidates.length} contextual candidates, ${nameExpansions.size} name expansions`);
+        }
+
+        // Pre-flight check: identify short person names that might be full names
+        // This helps catch cases like "Sean" → "Shawn Anderson" BEFORE backend resolution
+        const preFlightSuggestions: Array<{
+          shortName: string;
+          fullName: string;
+          confidence: string;
+          source: string;
+        }> = [];
+
+        for (const entity of args.entities) {
+          if (entity.type === 'Person' && !entity.name.includes(' ')) {
+            // This is a single-word person name - check for full name expansions
+            const nameLower = entity.name.toLowerCase();
+            const expansion = nameExpansions.get(nameLower);
+            if (expansion && expansion.fullName.toLowerCase() !== nameLower) {
+              preFlightSuggestions.push({
+                shortName: entity.name,
+                fullName: expansion.fullName,
+                confidence: expansion.confidence,
+                source: expansion.source
+              });
+            }
+          }
+        }
+
+        // Build resolution context from attendees
+        const resolutionContext = args.context?.attendees?.length
+          ? { associated_people: args.context.attendees }
+          : undefined;
+
         const response = await backendClient.ingestEntities({
           document_rid: documentRid,
           entities: args.entities.map(e => ({
@@ -4330,8 +4553,28 @@ Your feedback helps improve KOI for everyone.${
             context: e.context
           })),
           relationships: args.relationships,
-          source: 'obsidian-vault'
+          source: 'obsidian-vault',
+          context: resolutionContext  // Pass context for Tier 1.5 phonetic + contextual matching
         });
+
+        // Resolve URIs to actual vault paths
+        const allUris = response.canonical_entities.map(e => e.uri);
+        const vaultPathsResponse = await backendClient.resolveToVaultPaths(allUris);
+
+        // Build URI → wikilink map
+        const uriToWikilink = new Map<string, string>();
+        for (const mapping of vaultPathsResponse.mappings) {
+          uriToWikilink.set(mapping.canonical_uri, mapping.wikilink);
+        }
+
+        // Fallback function for URIs not in vault
+        const getWikilink = (uri: string, entityType: string, name: string): string => {
+          const mapped = uriToWikilink.get(uri);
+          if (mapped) return mapped;
+          // Fallback: generate from name and type
+          const fallbackPath = BackendClient.uriToVaultPath(uri, entityType);
+          return `[[${fallbackPath}]]`;
+        };
 
         // Format successful response
         let output = `# Entity Ingestion Results\n\n`;
@@ -4343,7 +4586,24 @@ Your feedback helps improve KOI for everyone.${
         output += `- Entities processed: ${response.stats.entities_processed}\n`;
         output += `- New entities created: ${response.stats.new_entities}\n`;
         output += `- Resolved to existing: ${response.stats.resolved_entities}\n`;
-        output += `- Relationships: ${response.stats.relationships_processed}\n\n`;
+        output += `- Relationships: ${response.stats.relationships_processed}\n`;
+        output += `- Vault paths resolved: ${vaultPathsResponse.resolved}/${vaultPathsResponse.total}\n`;
+        if (contextualCandidates.length > 0) {
+          output += `- Contextual candidates used: ${contextualCandidates.length}\n`;
+        }
+        output += '\n';
+
+        // Show pre-flight suggestions FIRST (most important for user to see)
+        if (preFlightSuggestions.length > 0) {
+          output += `## ⚠️ Possible Name Matches (Based on Context)\n\n`;
+          output += `These short names might refer to known people from related meetings:\n\n`;
+          output += `| Extracted Name | Might be... | Confidence | Source |\n`;
+          output += `|----------------|-------------|------------|--------|\n`;
+          for (const sug of preFlightSuggestions) {
+            output += `| ${sug.shortName} | **${sug.fullName}** | ${sug.confidence} | ${sug.source} |\n`;
+          }
+          output += `\n💡 **Tip:** If these are the same person, update the extraction to use the full name, then re-run.\n\n`;
+        }
 
         output += `## Resolved Entities\n\n`;
 
@@ -4354,12 +4614,11 @@ Your feedback helps improve KOI for everyone.${
         if (resolvedEntities.length > 0) {
           output += `### Resolved to Existing (${resolvedEntities.length})\n`;
           for (const entity of resolvedEntities) {
-            const vaultPath = BackendClient.uriToVaultPath(entity.uri, entity.type);
+            const wikilink = getWikilink(entity.uri, entity.type, entity.name);
             const status = entity.merged_with
               ? `merged from "${entity.merged_with}"`
               : `exact match`;
-            output += `- **${entity.name}** (${entity.type}) → [[${vaultPath}]] (${status})\n`;
-            output += `  URI: \`${entity.uri}\`\n`;
+            output += `- **${entity.name}** (${entity.type}) → ${wikilink} (${status})\n`;
           }
           output += '\n';
         }
@@ -4367,19 +4626,26 @@ Your feedback helps improve KOI for everyone.${
         if (newEntities.length > 0) {
           output += `### New Entities Created (${newEntities.length})\n`;
           for (const entity of newEntities) {
-            const vaultPath = BackendClient.uriToVaultPath(entity.uri, entity.type);
-            output += `- **${entity.name}** (${entity.type}) → [[${vaultPath}]] (NEW)\n`;
-            output += `  URI: \`${entity.uri}\`\n`;
+            const wikilink = getWikilink(entity.uri, entity.type, entity.name);
+            output += `- **${entity.name}** (${entity.type}) → ${wikilink} (NEW - create vault note)\n`;
           }
           output += '\n';
         }
 
         // Generate wikilink suggestions
         output += `## Suggested Wikilinks\n\n`;
-        output += `Use these wikilinks in your document:\n\n`;
+        output += `Copy these wikilinks into your document:\n\n`;
+        output += `| Entity | Wikilink |\n`;
+        output += `|--------|----------|\n`;
         for (const entity of response.canonical_entities) {
-          const vaultPath = BackendClient.uriToVaultPath(entity.uri, entity.type);
-          output += `- ${entity.name} → \`[[${vaultPath}]]\`\n`;
+          const wikilink = getWikilink(entity.uri, entity.type, entity.name);
+          // Add warning icon if this name has a suggested expansion from pre-flight check
+          const hasSuggestion = preFlightSuggestions.some(s => s.shortName === entity.name);
+          if (hasSuggestion) {
+            output += `| ${entity.name} ⚠️ | \`${wikilink}\` |\n`;
+          } else {
+            output += `| ${entity.name} | \`${wikilink}\` |\n`;
+          }
         }
 
         return {
@@ -4470,6 +4736,670 @@ Your feedback helps improve KOI for everyone.${
         content: [{
           type: 'text',
           text: `Error ingesting entities: ${errorMessage}`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Register a single vault entity with the backend.
+   */
+  private async vaultRegisterEntity(args: {
+    path: string;
+    update_frontmatter?: boolean;
+    backup?: boolean;
+  }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const updateFrontmatter = args.update_frontmatter ?? true;
+    const shouldBackup = args.backup ?? true;
+    const vaultPath = vault.getVaultPath();
+    const vaultName = vaultPath.split('/').pop() || 'Notes';
+
+    try {
+      // Backup vault before making changes
+      let backupInfo = '';
+      if (updateFrontmatter && shouldBackup) {
+        const backupResult = await backupVault('entity registration');
+        if (backupResult.success && !backupResult.skipped) {
+          backupInfo = `\n**Backup:** ${backupResult.commitHash || 'committed'}`;
+        } else if (!backupResult.success && !backupResult.skipped) {
+          logger.warn(`Backup failed: ${backupResult.message}`);
+        }
+      }
+
+      // Import vault-rid and vault-scanner modules dynamically
+      const { generateVaultRID, computeContentHash } = await import('./vault-rid.js');
+      const { scanFile, parseFrontmatter, reconstructNote } = await import('./vault-scanner.js');
+
+      // Scan the file
+      const entity = scanFile(vaultPath, vaultName, args.path);
+      if (!entity) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Error: Could not read or parse file: ${args.path}`
+          }]
+        };
+      }
+
+      // Check backend availability
+      const backendClient = getBackendClient();
+      const backendAvailable = await backendClient.isAvailable();
+
+      if (!backendAvailable) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Error: Personal KOI backend unavailable at http://localhost:8351\n\nThe backend is required for entity registration. To start it:\n\`\`\`\nlaunchctl load ~/Library/LaunchAgents/com.personal.koi-processor.plist\n\`\`\``
+          }]
+        };
+      }
+
+      // Register with backend
+      const response = await backendClient.registerEntity({
+        vault_rid: entity.rid,
+        vault_path: entity.relativePath,
+        entity_type: entity.entityType,
+        name: entity.name,
+        properties: entity.frontmatter,
+        content_hash: entity.contentHash
+      });
+
+      // Update frontmatter if requested
+      if (updateFrontmatter) {
+        const fullPath = `${vaultPath}/${args.path}`;
+        const noteData = await vault.readNote(args.path);
+        const { frontmatter, body } = parseFrontmatter(noteData.content);
+
+        if (frontmatter) {
+          const updatedFrontmatter = {
+            ...frontmatter,
+            koi: {
+              rid: entity.rid,
+              canonical_uri: response.canonical_uri,
+              sync_status: 'linked',
+              last_synced: new Date().toISOString()
+            }
+          };
+
+          const updatedContent = reconstructNote(updatedFrontmatter, body);
+          await vault.writeNote(args.path, updatedContent);
+
+          // Update backend with new content hash after frontmatter change
+          const { computeContentHash } = await import('./vault-rid.js');
+          const newContentHash = computeContentHash(updatedContent);
+          await backendClient.registerEntity({
+            vault_rid: entity.rid,
+            vault_path: args.path,
+            entity_type: entity.entityType,
+            name: entity.name,
+            properties: updatedFrontmatter,
+            content_hash: newContentHash
+          });
+        }
+      }
+
+      // Format response
+      let output = `# Entity Registration Result\n\n`;
+      output += `**Path:** ${args.path}\n`;
+      output += `**Name:** ${entity.name}\n`;
+      output += `**Type:** ${entity.entityType}\n`;
+      output += `**RID:** \`${entity.rid}\`\n`;
+      output += `**Canonical URI:** \`${response.canonical_uri}\`\n`;
+      output += `**Status:** ${response.is_new ? '🆕 NEW entity created' : '✅ Linked to existing entity'}\n`;
+      if (response.merged_with) {
+        output += `**Merged with:** ${response.merged_with}\n`;
+      }
+      if (updateFrontmatter) {
+        output += `**Frontmatter:** Updated with koi: metadata\n`;
+      }
+      if (backupInfo) {
+        output += backupInfo;
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error registering entity: ${errorMessage}`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Bulk sync vault entities with the backend.
+   */
+  private async vaultSyncEntities(args: {
+    folders?: string[];
+    mode?: 'register_new' | 'full_sync' | 'sync_changed';
+    update_frontmatter?: boolean;
+    backup?: boolean;
+  }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const folders = args.folders || ['People', 'Organizations', 'Projects', 'Locations', 'Concepts'];
+    const mode = args.mode || 'register_new';
+    const updateFrontmatter = args.update_frontmatter ?? true;
+    const shouldBackup = args.backup ?? true;
+    const vaultPath = vault.getVaultPath();
+    const vaultName = vaultPath.split('/').pop() || 'Notes';
+
+    try {
+      // Backup vault before making changes (if updating frontmatter)
+      let backupInfo = '';
+      if (updateFrontmatter && shouldBackup) {
+        const backupResult = await backupVault(`sync ${folders.join(', ')}`);
+        if (backupResult.success && !backupResult.skipped) {
+          backupInfo = `**Backup:** Committed (${backupResult.commitHash || 'done'})\n`;
+        } else if (!backupResult.success && !backupResult.skipped) {
+          logger.warn(`Backup failed: ${backupResult.message}`);
+          backupInfo = `**Backup:** Failed - ${backupResult.message}\n`;
+        }
+      }
+
+      const { scanVaultEntities } = await import('./vault-scanner.js');
+
+      // Check backend availability
+      const backendClient = getBackendClient();
+      const backendAvailable = await backendClient.isAvailable();
+
+      if (!backendAvailable) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Error: Personal KOI backend unavailable at http://localhost:8351\n\nThe backend is required for entity sync.`
+          }]
+        };
+      }
+
+      // Scan vault entities
+      const scanResult = await scanVaultEntities(vaultPath, vaultName, {
+        folders,
+        excludeSynced: mode === 'register_new'
+      });
+
+      // For sync_changed mode, get backend entities and identify changed ones
+      let backendEntities: Map<string, { canonical_uri: string; content_hash: string }> | undefined;
+      if (mode === 'sync_changed') {
+        try {
+          const response = await backendClient.getVaultEntities({ limit: 2000 });
+          backendEntities = new Map(
+            response.entities.map(e => [e.vault_rid, { canonical_uri: e.canonical_uri, content_hash: e.content_hash }])
+          );
+        } catch {
+          // Continue without backend comparison
+        }
+      }
+
+      // Track results
+      const results = {
+        registered: 0,
+        updated: 0,
+        skipped: 0,
+        errors: 0,
+        byType: {} as Record<string, number>
+      };
+
+      // Register each entity
+      for (const entity of scanResult.entities) {
+        try {
+          // Skip if already synced in register_new mode
+          if (mode === 'register_new' && entity.existingKoi?.sync_status === 'linked') {
+            results.skipped++;
+            continue;
+          }
+
+          // In sync_changed mode, only process entities with hash mismatch
+          if (mode === 'sync_changed' && backendEntities) {
+            const backendEntry = backendEntities.get(entity.rid);
+            if (!backendEntry) {
+              // Not in backend - this is a new entity, skip in sync_changed mode
+              results.skipped++;
+              continue;
+            }
+            if (backendEntry.content_hash === entity.contentHash) {
+              // Hash matches - no changes, skip
+              results.skipped++;
+              continue;
+            }
+            // Hash differs - process this entity
+          }
+
+          const response = await backendClient.registerEntity({
+            vault_rid: entity.rid,
+            vault_path: entity.relativePath,
+            entity_type: entity.entityType,
+            name: entity.name,
+            properties: entity.frontmatter,
+            content_hash: entity.contentHash
+          });
+
+          if (response.is_new) {
+            results.registered++;
+          } else {
+            results.updated++;
+          }
+
+          // Track by type
+          results.byType[entity.entityType] = (results.byType[entity.entityType] || 0) + 1;
+
+          // Update frontmatter if requested
+          if (updateFrontmatter) {
+            const { parseFrontmatter, reconstructNote } = await import('./vault-scanner.js');
+            const { computeContentHash } = await import('./vault-rid.js');
+            const noteData = await vault.readNote(entity.relativePath);
+            const { frontmatter, body } = parseFrontmatter(noteData.content);
+
+            if (frontmatter) {
+              const updatedFrontmatter = {
+                ...frontmatter,
+                koi: {
+                  rid: entity.rid,
+                  canonical_uri: response.canonical_uri,
+                  sync_status: 'linked',
+                  last_synced: new Date().toISOString()
+                }
+              };
+
+              const updatedContent = reconstructNote(updatedFrontmatter, body);
+              await vault.writeNote(entity.relativePath, updatedContent);
+
+              // Update backend with new content hash after frontmatter change
+              const newContentHash = computeContentHash(updatedContent);
+              await backendClient.registerEntity({
+                vault_rid: entity.rid,
+                vault_path: entity.relativePath,
+                entity_type: entity.entityType,
+                name: entity.name,
+                properties: updatedFrontmatter,
+                content_hash: newContentHash
+              });
+            }
+          }
+
+        } catch (error) {
+          results.errors++;
+          logger.error(`Failed to register ${entity.relativePath}: ${error}`);
+        }
+      }
+
+      // Format response
+      let output = `# Vault Entity Sync Results\n\n`;
+      output += `**Mode:** ${mode}\n`;
+      output += `**Folders:** ${folders.join(', ')}\n`;
+      output += `**Update frontmatter:** ${updateFrontmatter}\n`;
+      if (backupInfo) {
+        output += backupInfo;
+      }
+      output += '\n';
+
+      output += `## Statistics\n`;
+      output += `- Total scanned: ${scanResult.stats.scannedFiles}\n`;
+      output += `- Registered (new): ${results.registered}\n`;
+      output += `- Updated (existing): ${results.updated}\n`;
+      output += `- Skipped (already synced): ${results.skipped}\n`;
+      output += `- Errors: ${results.errors}\n\n`;
+
+      if (Object.keys(results.byType).length > 0) {
+        output += `## By Type\n`;
+        for (const [type, count] of Object.entries(results.byType)) {
+          output += `- ${type}: ${count}\n`;
+        }
+      }
+
+      if (scanResult.errors.length > 0) {
+        output += `\n## Errors\n`;
+        for (const err of scanResult.errors.slice(0, 10)) {
+          output += `- ${err.path}: ${err.error}\n`;
+        }
+        if (scanResult.errors.length > 10) {
+          output += `- ... and ${scanResult.errors.length - 10} more\n`;
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error syncing entities: ${errorMessage}`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Check sync status between vault entities and backend.
+   */
+  private async vaultCheckSyncStatus(args: {
+    folder?: string;
+  }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const folders = args.folder ? [args.folder] : ['People', 'Organizations', 'Projects', 'Locations', 'Concepts'];
+    const vaultPath = vault.getVaultPath();
+    const vaultName = vaultPath.split('/').pop() || 'Notes';
+
+    try {
+      const { scanVaultEntities, checkSyncStatus } = await import('./vault-scanner.js');
+
+      // Scan vault entities
+      const scanResult = await scanVaultEntities(vaultPath, vaultName, { folders });
+
+      // Get backend entities if available
+      const backendClient = getBackendClient();
+      const backendAvailable = await backendClient.isAvailable();
+
+      let backendEntities: Map<string, { canonical_uri: string; content_hash: string }> | undefined;
+
+      if (backendAvailable) {
+        try {
+          const response = await backendClient.getVaultEntities({ limit: 1000 });
+          backendEntities = new Map(
+            response.entities.map(e => [e.vault_rid, { canonical_uri: e.canonical_uri, content_hash: e.content_hash }])
+          );
+        } catch {
+          // Endpoint may not exist yet
+        }
+      }
+
+      // Check sync status
+      const statuses = checkSyncStatus(scanResult.entities, backendEntities);
+
+      // Aggregate stats
+      const stats = {
+        total: statuses.length,
+        linked: 0,
+        local_only: 0,
+        pending_sync: 0,
+        conflict: 0,
+        unknown: 0
+      };
+
+      for (const status of statuses) {
+        stats[status.status]++;
+      }
+
+      // Format response
+      let output = `# Vault Sync Status\n\n`;
+      output += `**Folders:** ${folders.join(', ')}\n`;
+      output += `**Backend:** ${backendAvailable ? '✅ Available' : '❌ Unavailable'}\n\n`;
+
+      output += `## Summary\n`;
+      output += `- Total entities: ${stats.total}\n`;
+      output += `- ✅ Linked: ${stats.linked}\n`;
+      output += `- 📝 Local only: ${stats.local_only}\n`;
+      output += `- 🔄 Pending sync: ${stats.pending_sync}\n`;
+      output += `- ⚠️ Conflict: ${stats.conflict}\n`;
+      if (stats.unknown > 0) {
+        output += `- ❓ Unknown: ${stats.unknown}\n`;
+      }
+
+      // Show entities by status
+      if (stats.local_only > 0) {
+        output += `\n## Not Registered (${stats.local_only})\n`;
+        const localOnly = statuses.filter(s => s.status === 'local_only').slice(0, 20);
+        for (const s of localOnly) {
+          output += `- [[${s.path.replace('.md', '')}]] (${s.name})\n`;
+        }
+        if (stats.local_only > 20) {
+          output += `- ... and ${stats.local_only - 20} more\n`;
+        }
+      }
+
+      if (stats.pending_sync > 0) {
+        output += `\n## Pending Sync (${stats.pending_sync})\n`;
+        const pending = statuses.filter(s => s.status === 'pending_sync');
+        for (const s of pending) {
+          output += `- [[${s.path.replace('.md', '')}]] - content changed\n`;
+        }
+      }
+
+      if (stats.conflict > 0) {
+        output += `\n## Conflicts (${stats.conflict})\n`;
+        const conflicts = statuses.filter(s => s.status === 'conflict');
+        for (const s of conflicts) {
+          output += `- [[${s.path.replace('.md', '')}]] - local and backend diverged\n`;
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error checking sync status: ${errorMessage}`
+        }]
+      };
+    }
+  }
+
+  /**
+   * List available entity types from backend schema configuration.
+   * This is the source of truth for entity types - do not hardcode types elsewhere.
+   */
+  private async listEntityTypes(): Promise<{ content: Array<{ type: string; text: string }> }> {
+    try {
+      const types = await getEntityTypes();
+      const version = await getSchemaVersion();
+
+      let output = `# Entity Types (Schema Version: ${version})\n\n`;
+      output += `Found ${types.length} configured entity types:\n\n`;
+      output += `| Type | Folder | Phonetic | Min Context | Similarity |\n`;
+      output += `|------|--------|----------|-------------|------------|\n`;
+
+      for (const t of types) {
+        output += `| ${t.type_key} | ${t.folder} | ${t.phonetic_matching ? '✓' : '✗'} | ${t.min_context_people} | ${t.similarity_threshold} |\n`;
+      }
+
+      output += `\n## Phonetic-Enabled Types\n`;
+      const phoneticTypes = types.filter(t => t.phonetic_matching);
+      if (phoneticTypes.length > 0) {
+        output += `Types with phonetic matching (for transcription typos): ${phoneticTypes.map(t => t.type_key).join(', ')}\n`;
+      } else {
+        output += `No types have phonetic matching enabled.\n`;
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error listing entity types: ${errorMessage}`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Search Claude Code session history.
+   * Calls the personal KOI API's /search-sessions endpoint.
+   */
+  private async searchSessions(args: { query: string; limit?: number; session_id?: string }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const { query, limit = 10, session_id } = args;
+
+    try {
+      const backendUrl = process.env.KOI_BACKEND_URL || 'http://localhost:8351';
+      const response = await fetch(`${backendUrl}/search-sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, limit, session_id })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          content: [{
+            type: 'text',
+            text: `Error searching sessions: ${response.status} - ${errorText}`
+          }]
+        };
+      }
+
+      interface SessionResult {
+        session_id: string;
+        session_rid: string;
+        chunk_index: number;
+        chunk_text: string;
+        similarity?: number;
+        summary?: string;
+        first_prompt?: string;
+        timestamp?: string;
+      }
+
+      const data = await response.json() as {
+        results: SessionResult[];
+        count: number;
+        query: string;
+        search_type: string;
+      };
+
+      if (!data.results || data.results.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: `No sessions found matching: "${query}"\n\nTip: Run the session sensor to index your Claude Code sessions first.`
+          }]
+        };
+      }
+
+      // Format results
+      let output = `# Session Search Results for: "${query}"\n\n`;
+      output += `Found ${data.count} matching chunks (search type: ${data.search_type})\n\n`;
+
+      for (const result of data.results) {
+        const similarity = result.similarity ? ` (${(result.similarity * 100).toFixed(1)}% match)` : '';
+        const date = result.timestamp ? new Date(result.timestamp).toLocaleDateString() : 'Unknown date';
+
+        output += `---\n\n`;
+        output += `## Session: ${result.summary || 'Untitled'}${similarity}\n`;
+        output += `**Date**: ${date} | **Session ID**: \`${result.session_id}\`\n\n`;
+
+        if (result.first_prompt) {
+          output += `**First prompt**: ${result.first_prompt}...\n\n`;
+        }
+
+        output += `**Matching content:**\n\`\`\`\n${result.chunk_text.substring(0, 1000)}${result.chunk_text.length > 1000 ? '...' : ''}\n\`\`\`\n\n`;
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error searching sessions: ${errorMessage}\n\nMake sure the personal KOI backend is running on port 8351.`
+        }]
+      };
+    }
+  }
+
+  /**
+   * Get statistics about indexed Claude Code sessions.
+   */
+  private async getSessionStats(): Promise<{ content: Array<{ type: string; text: string }> }> {
+    try {
+      const backendUrl = process.env.KOI_BACKEND_URL || 'http://localhost:8351';
+      const response = await fetch(`${backendUrl}/session-stats`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          content: [{
+            type: 'text',
+            text: `Error getting session stats: ${response.status} - ${errorText}`
+          }]
+        };
+      }
+
+      interface RecentSession {
+        session_id: string;
+        summary?: string;
+        first_prompt?: string;
+        message_count: number;
+        chunk_count: number;
+        last_ingested_at?: string;
+      }
+
+      const data = await response.json() as {
+        indexed: boolean;
+        message?: string;
+        total_sessions?: number;
+        total_chunks?: number;
+        chunks_with_embeddings?: number;
+        embedding_coverage?: string;
+        recent_sessions?: RecentSession[];
+      };
+
+      if (!data.indexed) {
+        return {
+          content: [{
+            type: 'text',
+            text: `# Session Statistics\n\n${data.message || 'No sessions indexed yet.'}\n\nTo index sessions, run the Claude Sessions sensor:\n\`\`\`bash\ncd ~/projects/RegenAI/koi-sensors/sensors/claude_sessions\n./start.sh scan\n\`\`\``
+          }]
+        };
+      }
+
+      let output = `# Claude Code Session Statistics\n\n`;
+      output += `| Metric | Value |\n`;
+      output += `|--------|-------|\n`;
+      output += `| Total Sessions | ${data.total_sessions} |\n`;
+      output += `| Total Chunks | ${data.total_chunks} |\n`;
+      output += `| With Embeddings | ${data.chunks_with_embeddings} (${data.embedding_coverage}) |\n\n`;
+
+      if (data.recent_sessions && data.recent_sessions.length > 0) {
+        output += `## Recent Sessions\n\n`;
+        for (const session of data.recent_sessions) {
+          const date = session.last_ingested_at ? new Date(session.last_ingested_at).toLocaleDateString() : 'Unknown';
+          output += `- **${session.summary || 'Untitled'}** (${date})\n`;
+          output += `  - ${session.chunk_count} chunks, ${session.message_count} messages\n`;
+          if (session.first_prompt) {
+            output += `  - _"${session.first_prompt}"_\n`;
+          }
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error getting session stats: ${errorMessage}\n\nMake sure the personal KOI backend is running on port 8351.`
         }]
       };
     }
