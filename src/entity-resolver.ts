@@ -6,6 +6,7 @@
  */
 
 import { VaultEntity } from './entity-extraction.js';
+import { typeToFolderSync } from './entity-schema.js';
 
 export interface ResolutionResult {
   entity: string;
@@ -311,11 +312,8 @@ export class EntityResolver {
    * Get suggested path for a new entity
    */
   getSuggestedPath(entityName: string, entityType: string): string {
-    const folder = entityType === 'Person' ? 'People' :
-                   entityType === 'Organization' ? 'Organizations' :
-                   entityType === 'Location' ? 'Locations' :
-                   entityType === 'Project' ? 'Projects' :
-                   'Concepts';
+    // Use schema-driven folder mapping
+    const folder = typeToFolderSync(entityType);
 
     // Sanitize entity name for file path
     const safeName = entityName

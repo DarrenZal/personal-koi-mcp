@@ -8,6 +8,7 @@
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+import { typeToFolderSync, EntityTypeConfig, getEntityTypes } from './entity-schema.js';
 
 // =============================================================================
 // Types
@@ -28,12 +29,19 @@ export interface ExtractedRelationship {
   confidence?: number;
 }
 
+export interface ResolutionContext {
+  associated_people?: string[];
+  associated_orgs?: string[];
+  source_text?: string;
+}
+
 export interface IngestRequest {
   document_rid: string;
   content?: string;
   entities: ExtractedEntity[];
   relationships?: ExtractedRelationship[];
   source?: string;
+  context?: ResolutionContext;  // For contextual entity resolution (Tier 1.5)
 }
 
 export interface CanonicalEntity {
@@ -109,6 +117,41 @@ export interface BackendStats {
     created_at: string;
   }>;
   mode: string;
+}
+
+export interface RegisterEntityRequest {
+  vault_rid: string;
+  vault_path: string;
+  entity_type: string;
+  name: string;
+  properties: Record<string, any>;
+  content_hash: string;
+}
+
+export interface RegisterEntityResponse {
+  success: boolean;
+  canonical_uri: string;
+  is_new: boolean;
+  vault_rid: string;
+  merged_with?: string;
+}
+
+export interface VaultEntityMapping {
+  vault_rid: string;
+  vault_path: string;
+  canonical_uri: string;
+  entity_type: string;
+  name: string;
+  sync_status: 'linked' | 'local_only' | 'pending_sync' | 'conflict';
+  content_hash: string;
+  last_synced: string;
+}
+
+export interface VaultEntitiesResponse {
+  entities: VaultEntityMapping[];
+  count: number;
+  limit: number;
+  offset: number;
 }
 
 // =============================================================================
@@ -240,6 +283,7 @@ export class BackendClient {
         entities: request.entities,
         relationships: request.relationships || [],
         source: request.source || 'obsidian-vault',
+        context: request.context,  // Pass context for Tier 1.5 resolution
       });
 
       return response.data;
@@ -315,6 +359,174 @@ export class BackendClient {
   }
 
   /**
+   * Register a vault entity with the backend.
+   *
+   * This registers an existing vault entity note (from People/, Organizations/, etc.)
+   * with the backend for:
+   * 1. Deduplication against existing entities
+   * 2. Canonical URI assignment
+   * 3. RID mapping storage
+   */
+  async registerEntity(request: RegisterEntityRequest): Promise<RegisterEntityResponse> {
+    try {
+      const response = await this.client.post('/register-entity', {
+        vault_rid: request.vault_rid,
+        vault_path: request.vault_path,
+        entity_type: request.entity_type,
+        name: request.name,
+        properties: request.properties,
+        content_hash: request.content_hash,
+      });
+
+      return response.data;
+    } catch (e) {
+      const error = e as any;
+
+      // Check if endpoint doesn't exist yet (404)
+      if (error.response?.status === 404) {
+        throw new Error(
+          'Backend /register-entity endpoint not found. ' +
+          'The backend may need to be updated to support vault entity registration.'
+        );
+      }
+
+      // Check if it's a structured error response
+      if (error.response?.data) {
+        const data = error.response.data as { detail?: string };
+        throw new Error(`Backend error: ${data.detail || 'Unknown error'}`);
+      }
+
+      throw new Error(`Failed to register entity: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get all vault entities registered with the backend.
+   */
+  async getVaultEntities(options: {
+    entityType?: string;
+    syncStatus?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<VaultEntitiesResponse> {
+    try {
+      const params = new URLSearchParams();
+      if (options.entityType) params.set('entity_type', options.entityType);
+      if (options.syncStatus) params.set('sync_status', options.syncStatus);
+      if (options.limit) params.set('limit', options.limit.toString());
+      if (options.offset) params.set('offset', options.offset.toString());
+
+      const response = await this.client.get(`/vault-entities?${params.toString()}`);
+      return response.data;
+    } catch (e) {
+      const error = e as any;
+
+      // Check if endpoint doesn't exist yet (404)
+      if (error.response?.status === 404) {
+        // Return empty result if endpoint not implemented
+        return {
+          entities: [],
+          count: 0,
+          limit: options.limit || 100,
+          offset: options.offset || 0,
+        };
+      }
+
+      throw new Error(`Failed to get vault entities: ${error.message}`);
+    }
+  }
+
+  /**
+   * Resolve canonical URIs to vault paths for wikilink generation.
+   *
+   * Given a list of canonical entity URIs, returns the corresponding vault paths
+   * and pre-formatted wikilinks.
+   */
+  async resolveToVaultPaths(uris: string[]): Promise<{
+    mappings: Array<{
+      canonical_uri: string;
+      vault_path: string;
+      name: string;
+      entity_type: string;
+      wikilink: string;
+    }>;
+    not_found: string[];
+    resolved: number;
+    total: number;
+  }> {
+    try {
+      const response = await this.client.post('/resolve-to-vault', uris);
+      return response.data;
+    } catch (e) {
+      const error = e as any;
+
+      // Check if endpoint doesn't exist yet (404)
+      if (error.response?.status === 404) {
+        // Return empty result - use fallback path generation
+        return {
+          mappings: [],
+          not_found: uris,
+          resolved: 0,
+          total: uris.length,
+        };
+      }
+
+      throw new Error(`Failed to resolve URIs to vault paths: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get contextual entity candidates based on related meetings.
+   *
+   * When processing a meeting, this helps resolve ambiguous names like "Sean"
+   * by returning people from related meetings (same project, common attendees).
+   */
+  async getContextualCandidates(options: {
+    project?: string;
+    attendees?: string[];
+    topics?: string[];
+    documentRid?: string;
+  } = {}): Promise<{
+    candidates: Array<{
+      name: string;
+      uri: string;
+      normalized_name: string;
+      source_documents: string[];
+      vault_path?: string;
+    }>;
+    related_documents: string[];
+    context_types: string[];
+    candidate_count: number;
+    related_document_count: number;
+  }> {
+    try {
+      const response = await this.client.post('/get-contextual-candidates', {
+        project: options.project,
+        attendees: options.attendees,
+        topics: options.topics,
+        document_rid: options.documentRid,
+      });
+      return response.data;
+    } catch (e) {
+      const error = e as any;
+
+      // Check if endpoint doesn't exist yet (404)
+      if (error.response?.status === 404) {
+        // Return empty result
+        return {
+          candidates: [],
+          related_documents: [],
+          context_types: [],
+          candidate_count: 0,
+          related_document_count: 0,
+        };
+      }
+
+      throw new Error(`Failed to get contextual candidates: ${error.message}`);
+    }
+  }
+
+  /**
    * Convert document path to RID
    */
   static pathToRid(vaultPath: string, docPath: string): string {
@@ -349,24 +561,23 @@ export class BackendClient {
         .map(w => w.charAt(0).toUpperCase() + w.slice(1))
         .join(' ');
 
-      // Map type to folder
-      const folder = type === 'person' ? 'People' :
-                    type === 'organization' ? 'Organizations' :
-                    type === 'location' ? 'Locations' :
-                    type === 'project' ? 'Projects' :
-                    'Concepts';
+      // Map type to folder (schema-driven, capitalize first letter for lookup)
+      const typeKey = type.charAt(0).toUpperCase() + type.slice(1);
+      const folder = typeToFolderSync(typeKey);
 
       return `${folder}/${name}`;
     }
 
-    // Fallback: derive from entity type
-    const folder = entityType === 'Person' ? 'People' :
-                  entityType === 'Organization' ? 'Organizations' :
-                  entityType === 'Location' ? 'Locations' :
-                  entityType === 'Project' ? 'Projects' :
-                  'Concepts';
-
+    // Fallback: derive from entity type (schema-driven)
+    const folder = typeToFolderSync(entityType);
     return `${folder}/Unknown`;
+  }
+
+  /**
+   * Get entity types from backend
+   */
+  async getEntityTypes(): Promise<EntityTypeConfig[]> {
+    return getEntityTypes();
   }
 }
 

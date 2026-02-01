@@ -7,6 +7,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { getEntityTypes, folderToTypeSync, getAllEntityFoldersSync, prefetchEntityTypes } from './entity-schema.js';
 
 // Default vault path - can be overridden with OBSIDIAN_VAULT_PATH env var
 const DEFAULT_VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH ||
@@ -371,20 +372,21 @@ export async function getNoteByEntity(
 
 /**
  * Build an index of all entities in the vault
- * Scans People/, Organizations/, Projects/, Locations/, Concepts/ folders
+ * Scans entity folders dynamically from schema configuration
  */
 export async function buildEntityIndex(): Promise<VaultEntityInfo[]> {
   const entities: VaultEntityInfo[] = [];
   const vaultPath = getVaultPath();
 
-  // Entity folders to scan
-  const entityFolders = [
-    { folder: 'People', type: 'Person' },
-    { folder: 'Organizations', type: 'Organization' },
-    { folder: 'Projects', type: 'Project' },
-    { folder: 'Locations', type: 'Location' },
-    { folder: 'Concepts', type: 'Concept' }
-  ];
+  // Prefetch entity types to populate sync maps
+  await prefetchEntityTypes();
+
+  // Get entity folders from schema (dynamic, not hardcoded)
+  const schemaTypes = await getEntityTypes();
+  const entityFolders = schemaTypes.map(t => ({
+    folder: t.folder,
+    type: t.type_key
+  }));
 
   for (const { folder, type } of entityFolders) {
     const folderPath = path.join(vaultPath, folder);

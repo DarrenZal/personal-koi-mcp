@@ -5,6 +5,8 @@
  * Uses structured prompts to identify people, organizations, locations, and concepts.
  */
 
+import { typeToFolderSync } from './entity-schema.js';
+
 export interface ExtractedEntity {
   name: string;
   type: 'Person' | 'Organization' | 'Location' | 'Concept' | 'Project';
@@ -282,12 +284,8 @@ export function generateSuggestedWikilinks(
     const resolved = resolvedEntities.get(entity.name);
 
     for (const mention of entity.mentions) {
-      // Determine the folder based on entity type
-      const folder = entity.type === 'Person' ? 'People' :
-                     entity.type === 'Organization' ? 'Organizations' :
-                     entity.type === 'Location' ? 'Locations' :
-                     entity.type === 'Project' ? 'Projects' :
-                     'Concepts';
+      // Determine the folder based on entity type (schema-driven)
+      const folder = typeToFolderSync(entity.type);
 
       // Build the wikilink
       const notePath = resolved?.path || `${folder}/${entity.name}`;
