@@ -988,6 +988,16 @@ If backend is unavailable, falls back to vault-only resolution.`,
               context: {
                 type: 'string',
                 description: 'Brief context about the entity from the document'
+              },
+              associated_people: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'People mentioned alongside this entity (for per-entity context)'
+              },
+              associated_organizations: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Organizations mentioned alongside this entity (for per-entity context)'
               }
             },
             required: ['name', 'type']
@@ -1017,12 +1027,17 @@ If backend is unavailable, falls back to vault-only resolution.`,
           properties: {
             project: {
               type: 'string',
-              description: 'Project name (e.g., "GLOTCHA") - finds people from related meetings'
+              description: 'Project name (e.g., "Gaia AI") - enables multi-hop resolution via org→project relationships'
             },
             attendees: {
               type: 'array',
               items: { type: 'string' },
               description: 'Known attendees - finds other people they have met with'
+            },
+            organizations: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Organizations mentioned in the document - checks founder/member relationships'
             },
             topics: {
               type: 'array',

@@ -20,6 +20,9 @@ export interface ExtractedEntity {
   mentions: string[];
   confidence: number;
   context?: string;
+  // Per-entity context for resolution (merged with global context)
+  associated_people?: string[];
+  associated_organizations?: string[];
 }
 
 export interface ExtractedRelationship {
@@ -30,8 +33,11 @@ export interface ExtractedRelationship {
 }
 
 export interface ResolutionContext {
-  associated_people?: string[];
-  associated_orgs?: string[];
+  associated_people?: string[];  // People in the meeting/document (backend naming)
+  organizations?: string[];       // Organizations mentioned
+  project?: string;               // Project context for multi-hop resolution
+  topics?: string[];              // Topics for future use
+  associated_orgs?: string[];     // Deprecated: use organizations instead
   source_text?: string;
 }
 
@@ -125,6 +131,7 @@ export interface RegisterEntityRequest {
   entity_type: string;
   name: string;
   properties: Record<string, any>;
+  frontmatter?: Record<string, any>;  // Preferred - for relationship extraction
   content_hash: string;
 }
 
@@ -375,6 +382,7 @@ export class BackendClient {
         entity_type: request.entity_type,
         name: request.name,
         properties: request.properties,
+        frontmatter: request.frontmatter || request.properties,  // Send frontmatter explicitly for relationship extraction
         content_hash: request.content_hash,
       });
 

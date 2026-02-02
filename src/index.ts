@@ -4544,9 +4544,16 @@ Your feedback helps improve KOI for everyone.${
           }
         }
 
-        // Build resolution context from attendees
-        const resolutionContext = args.context?.attendees?.length
-          ? { associated_people: args.context.attendees }
+        // Build resolution context - map user-facing names to backend names
+        const resolutionContext = (args.context?.attendees?.length ||
+                                    args.context?.organizations?.length ||
+                                    args.context?.project)
+          ? {
+              associated_people: args.context.attendees || [],  // Map attendees → associated_people
+              organizations: args.context.organizations || [],
+              project: args.context.project,
+              topics: args.context.topics || []
+            }
           : undefined;
 
         const response = await backendClient.ingestEntities({
@@ -4556,7 +4563,10 @@ Your feedback helps improve KOI for everyone.${
             type: e.type,
             mentions: e.mentions || [e.name],
             confidence: e.confidence || 0.9,
-            context: e.context
+            context: e.context,
+            // Pass through per-entity context fields
+            associated_people: e.associated_people || [],
+            associated_organizations: e.associated_organizations || []
           })),
           relationships: args.relationships,
           source: 'obsidian-vault',
