@@ -430,10 +430,10 @@ class KOIServer {
           case 'vault_ingest_extraction':
             result = await this.vaultIngestExtraction(args as {
               path: string;
-              entities: Array<{ name: string; type: string; mentions?: string[]; confidence?: number; context?: string }>;
+              entities: Array<{ name: string; type: string; mentions?: string[]; confidence?: number; context?: string; associated_people?: string[]; associated_organizations?: string[] }>;
               relationships?: Array<{ subject: string; predicate: string; object: string }>;
               fallbackToVault?: boolean;
-              context?: { project?: string; attendees?: string[]; topics?: string[] };
+              context?: { project?: string; attendees?: string[]; topics?: string[]; organizations?: string[] };
             });
             break;
           case 'vault_register_entity':
@@ -4445,6 +4445,8 @@ Your feedback helps improve KOI for everyone.${
       mentions?: string[];
       confidence?: number;
       context?: string;
+      associated_people?: string[];
+      associated_organizations?: string[];
     }>;
     relationships?: Array<{
       subject: string;
@@ -4456,6 +4458,7 @@ Your feedback helps improve KOI for everyone.${
       project?: string;
       attendees?: string[];
       topics?: string[];
+      organizations?: string[];
     };
   }): Promise<{ content: Array<{ type: string; text: string }> }> {
     const fallbackToVault = args.fallbackToVault ?? true;
