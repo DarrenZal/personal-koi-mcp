@@ -93,6 +93,31 @@ search(query="regen network carbon credits")
 |------|-------------|
 | `resolve_entity` | Find or create entity in personal KB |
 | `get_entity_neighborhood` | Get entity relationships |
+| `vault_ingest_extraction` | Ingest entities with contextual resolution |
+| `vault_sync_entities` | Sync vault entity folders to backend |
+
+**Contextual Resolution** (Tier 1.5):
+- Pass `context.organizations` and `context.project` for disambiguation
+- Per-entity `associated_people`/`associated_organizations` fields
+- Phonetic matching for name variants (Sean → Shawn)
+- 2-hop relationship paths: Person → Org → Project
+
+```javascript
+// Example: Resolve ambiguous name with context
+vault_ingest_extraction({
+  path: "Meetings/My Meeting.md",
+  entities: [{
+    name: "Sean Anderson",
+    type: "Person",
+    associated_organizations: ["Symbiocene Labs"]
+  }],
+  context: {
+    organizations: ["Symbiocene Labs"],
+    project: "Gaia AI"
+  }
+})
+// Result: Resolves to "Shawn Anderson" @ 93.4% confidence
+```
 
 ## Architecture
 
