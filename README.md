@@ -121,6 +121,13 @@ vault_ingest_extraction({
 
 ## Architecture
 
+This local setup is a 3-repository stack:
+- `koi-sensors` for data ingestion (`email`, `claude_sessions`, vault/sensor pipelines)
+- `koi-processor` for storage and query endpoints on `http://localhost:8351`
+- `personal-koi-mcp` for MCP tools consumed by Claude Code
+
+Runbook: [`docs/LOCAL_STACK_RUNBOOK.md`](docs/LOCAL_STACK_RUNBOOK.md)
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Personal KOI System                          │

@@ -2,6 +2,16 @@
 
 This document explains the different ways to deploy and use the Regen KOI MCP server.
 
+## Personal Local Stack (3 Repositories)
+
+For the personal/local deployment, the stack is:
+
+1. `koi-sensors` for ingestion (`email`, `claude_sessions`, and other sensors)
+2. `koi-processor` for personal ingest/query APIs and database writes
+3. `personal-koi-mcp` for MCP tool access from Claude Code
+
+Operational runbook: `docs/LOCAL_STACK_RUNBOOK.md`
+
 ## 📋 Deployment Options
 
 ### Option 1: Hosted API (Recommended for Most Users)
