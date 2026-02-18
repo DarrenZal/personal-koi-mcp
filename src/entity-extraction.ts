@@ -9,7 +9,9 @@ import { typeToFolderSync } from './entity-schema.js';
 
 export interface ExtractedEntity {
   name: string;
-  type: 'Person' | 'Organization' | 'Location' | 'Concept' | 'Project';
+  type: 'Person' | 'Organization' | 'Location' | 'Concept' | 'Project'
+       | 'Practice' | 'Pattern' | 'CaseStudy' | 'Bioregion'
+       | 'Protocol' | 'Playbook' | 'Question' | 'Claim' | 'Evidence';
   mentions: Array<{
     text: string;
     startOffset: number;
@@ -78,9 +80,18 @@ export function buildExtractionPrompt(
 
 1. **People** - Named individuals (authors, researchers, experts, officials)
 2. **Organizations** - Companies, government agencies, NGOs, universities, First Nations
-3. **Locations** - Geographic places, bodies of water, regions
+3. **Locations** - Geographic places, bodies of water, cities, countries, administrative boundaries
 4. **Projects** - Named initiatives, programs, or research projects
 5. **Concepts** - Key topics, technical terms, or themes central to the document
+6. **Practices** - Bioregional activities, approaches, or methods (e.g., "herring monitoring", "community seed saving")
+7. **Patterns** - Trans-bioregional generalizations from practices (e.g., "commons resource monitoring")
+8. **Case Studies** - Documented examples of practices/patterns in action
+9. **Bioregions** - Named ecological/cultural regions ONLY (e.g., "Salish Sea", "Cascadia", "Greater Tkaronto"). Do NOT use Bioregion for cities, countries, or administrative boundaries — use Location for those.
+10. **Protocols** - General coordination patterns (e.g., "quadratic funding", "consent-based governance")
+11. **Playbooks** - Local implementations of protocols in specific contexts
+12. **Questions** - Inquiries or hypotheses driving investigation
+13. **Claims** - Assertions or conclusions
+14. **Evidence** - Data, observations, or results
 
 For each entity:
 - Provide the canonical name (normalized form)
@@ -95,6 +106,7 @@ ${entityContext}
 - Include common abbreviations as mentions
 - Skip generic/common terms unless they're central themes
 - Focus on entities that would benefit from linking (named, specific, referenceable)
+- Distinguish Bioregion (ecological/cultural regions) from Location (cities, countries, admin boundaries)
 
 ## Document Content:
 
@@ -107,7 +119,7 @@ ${documentContent}
   "entities": [
     {
       "name": "Canonical Name",
-      "type": "Person|Organization|Location|Project|Concept",
+      "type": "Person|Organization|Location|Project|Concept|Practice|Pattern|CaseStudy|Bioregion|Protocol|Playbook|Question|Claim|Evidence",
       "mentions": ["mention1", "mention2"],
       "confidence": 0.95,
       "context": "Brief description of role in document"
