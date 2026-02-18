@@ -9,8 +9,8 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import { getEntityTypes, folderToTypeSync, getAllEntityFoldersSync, prefetchEntityTypes } from './entity-schema.js';
 
-// Default vault path - can be overridden with OBSIDIAN_VAULT_PATH env var
-const DEFAULT_VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH ||
+// Default vault path - VAULT_PATH is primary, OBSIDIAN_VAULT_PATH is fallback
+const DEFAULT_VAULT_PATH = process.env.VAULT_PATH || process.env.OBSIDIAN_VAULT_PATH ||
   path.join(process.env.HOME || '', 'Documents', 'Notes');
 
 // Excluded folders
@@ -43,8 +43,20 @@ export interface VaultEntityInfo {
  * Get the vault path, validating it exists
  */
 export function getVaultPath(): string {
-  const vaultPath = process.env.OBSIDIAN_VAULT_PATH || DEFAULT_VAULT_PATH;
+  const vaultPath = process.env.VAULT_PATH || process.env.OBSIDIAN_VAULT_PATH || DEFAULT_VAULT_PATH;
   return vaultPath;
+}
+
+/**
+ * Resolve a relative path within the vault, rejecting traversals outside the vault root.
+ */
+function safeResolve(vaultPath: string, relativePath: string): string {
+  const resolved = path.resolve(vaultPath, relativePath);
+  const normalizedVault = path.resolve(vaultPath);
+  if (!resolved.startsWith(normalizedVault + path.sep) && resolved !== normalizedVault) {
+    throw new Error(`Path traversal rejected: "${relativePath}" resolves outside vault root`);
+  }
+  return resolved;
 }
 
 /**
@@ -130,7 +142,7 @@ export async function readNote(notePath: string): Promise<{
   // Normalize path - add .md if missing
   let fullPath = notePath;
   if (!path.isAbsolute(notePath)) {
-    fullPath = path.join(vaultPath, notePath);
+    fullPath = safeResolve(vaultPath, notePath);
   }
   if (!fullPath.endsWith('.md')) {
     fullPath += '.md';
@@ -174,7 +186,7 @@ export async function writeNote(
   // Normalize path
   let fullPath = notePath;
   if (!path.isAbsolute(notePath)) {
-    fullPath = path.join(vaultPath, notePath);
+    fullPath = safeResolve(vaultPath, notePath);
   }
   if (!fullPath.endsWith('.md')) {
     fullPath += '.md';
@@ -219,7 +231,7 @@ export async function listNotes(options: {
 }): Promise<NoteInfo[]> {
   const vaultPath = getVaultPath();
   const searchPath = options.folder
-    ? path.join(vaultPath, options.folder)
+    ? safeResolve(vaultPath, options.folder)
     : vaultPath;
 
   const results: NoteInfo[] = [];
