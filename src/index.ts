@@ -46,6 +46,8 @@ import { createProcessor } from './document-processor.js';
 import { getBackendClient, BackendClient } from './backend-client.js';
 // Entity schema loader (for schema-driven entity types)
 import { prefetchEntityTypes, getEntityTypes, getSchemaVersion } from './entity-schema.js';
+// KOI API tools (koi-tool-contract.md)
+import { KOI_API_TOOL_DEFINITIONS, KOI_API_TOOL_NAMES, handleKoiApiTool } from './koi-api-tools.js';
 // Child process for git commands
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -280,7 +282,10 @@ class KOIServer {
   private setupHandlers() {
     // Handle tool list requests
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: TOOLS,
+      tools: [
+        ...TOOLS.filter(t => !KOI_API_TOOL_NAMES.has(t.name)),
+        ...KOI_API_TOOL_DEFINITIONS,
+      ],
     }));
 
     // Handle tool execution
@@ -317,6 +322,22 @@ class KOIServer {
         }
 
         let result: any;
+
+        // Contract-aligned KOI API tools take priority over legacy handlers
+        if (KOI_API_TOOL_NAMES.has(name)) {
+          result = await handleKoiApiTool(name, args as Record<string, unknown>);
+
+          const duration = Date.now() - startTime;
+          recordQuery(name, duration, true);
+          logger.info({
+            action: 'tool_execute_success',
+            tool: name,
+            duration_ms: duration
+          }, `Tool ${name} completed in ${duration}ms`);
+
+          return result;
+        }
+
         switch (name) {
           case 'query_code_graph':
             result = await executeGraphTool(args);
