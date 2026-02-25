@@ -87,6 +87,32 @@ search(query="regen network carbon credits")
 | `search_sessions_by_tool` | Find sessions using specific tools |
 | `search_sessions_by_files` | Find sessions touching specific files |
 
+### KOI Federation Sharing (P2P + Commons)
+
+| Tool | Description |
+|------|-------------|
+| `share_document` | Share a vault doc to a KOI node alias with rich modes (`root_only`, `root_plus_required`, `context_pack`) |
+| `shared_with_me` | List inbound shared docs and share metadata |
+| `commons_intake` | List staged/approved/rejected commons intake records |
+| `commons_intake_decide` | Approve/reject staged commons intake entries (local admin auth) |
+
+Key `share_document` args:
+- `recipient` — node alias or node name (for example `shawn`, `cowichan`)
+- `recipient_type` — `peer` (default) or `commons`
+- `mode` — `root_only`, `root_plus_required`, or `context_pack`
+- `context_depth` — traversal depth (1-4)
+
+Example:
+```javascript
+share_document({
+  document_path: "projects/koi-protocol-comparison.md",
+  recipient: "cowichan",
+  recipient_type: "commons",
+  mode: "context_pack",
+  context_depth: 2
+})
+```
+
 ### Entity Resolution
 
 | Tool | Description |

@@ -13,6 +13,7 @@ import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import YAML from 'yaml';
 
 // =============================================================================
 // Client setup
@@ -30,6 +31,25 @@ function getKoiClient(): any {
     });
   }
   return koiClient;
+}
+
+async function getKoiAdminAuthHeaders(): Promise<Record<string, string> | undefined> {
+  let token = process.env.KOI_ADMIN_TOKEN;
+  if (!token) {
+    const home = process.env.HOME || '';
+    const defaultStateDir = home ? path.join(home, '.config', 'personal-koi', 'koi-state') : '';
+    const stateDir = process.env.KOI_STATE_DIR || defaultStateDir;
+    if (stateDir) {
+      const tokenPath = path.join(stateDir, 'admin_token');
+      try {
+        token = (await fs.readFile(tokenPath, 'utf-8')).trim();
+      } catch {
+        token = undefined;
+      }
+    }
+  }
+  if (!token) return undefined;
+  return { Authorization: `Bearer ${token}` };
 }
 
 // =============================================================================
@@ -60,6 +80,536 @@ async function resolveToUri(client: any, nameOrUri: string): Promise<string> {
     return candidates[0].uri;
   }
   throw new Error(`Could not resolve "${nameOrUri}" to a known entity`);
+}
+
+type ShareMode = 'root_only' | 'root_plus_required' | 'context_pack';
+type RecipientType = 'peer' | 'commons';
+
+type ShareLinkType = 'embed' | 'wikilink' | 'markdown_embed' | 'markdown_link' | 'frontmatter';
+
+type ShareRef = {
+  raw_target: string;
+  link_type: ShareLinkType;
+  required: boolean;
+  source_path?: string;
+  source_rid?: string;
+  source_depth?: number;
+  resolved_path?: string;
+  ref_rid?: string;
+  target_depth?: number;
+  exists?: boolean;
+  included?: boolean;
+  include_reason?: string;
+  skip_reason?: string;
+};
+
+type ShareDependencyDoc = {
+  rid: string;
+  vault_path: string;
+  content: string;
+  content_type: 'text/markdown';
+  depth: number;
+  required: boolean;
+  parent_rid?: string;
+  parent_path?: string;
+};
+
+type ShareGraphNode = {
+  rid: string;
+  vault_path: string;
+  depth: number;
+  included: boolean;
+  role: 'root' | 'dependency';
+};
+
+type ShareGraphEdge = {
+  source_rid: string;
+  source_path: string;
+  source_depth: number;
+  raw_target: string;
+  link_type: ShareLinkType;
+  required: boolean;
+  target_rid?: string;
+  target_path?: string;
+  target_depth?: number;
+  exists: boolean;
+  included: boolean;
+  include_reason?: string;
+  skip_reason?: string;
+};
+
+type ShareDependencyGraph = {
+  max_depth_requested: number;
+  max_depth_reached: number;
+  nodes: ShareGraphNode[];
+  edges: ShareGraphEdge[];
+  missing_references: ShareGraphEdge[];
+  summary: {
+    total_references: number;
+    resolved_references: number;
+    unresolved_references: number;
+    included_references: number;
+    missing_references: number;
+    required_missing: number;
+    optional_missing: number;
+    excluded_by_reason: Record<string, number>;
+  };
+};
+
+const SHARE_MODES: ShareMode[] = ['root_only', 'root_plus_required', 'context_pack'];
+const RECIPIENT_TYPES: RecipientType[] = ['peer', 'commons'];
+const DEFAULT_OPTIONAL_LIMIT = 12;
+const MAX_SHARE_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const DEFAULT_CONTEXT_DEPTH_CONTEXT_PACK = 2;
+const DEFAULT_CONTEXT_DEPTH_OTHER = 1;
+const MAX_CONTEXT_DEPTH = 4;
+
+function parseContextDepth(raw: number | undefined, mode: ShareMode): number {
+  if (raw === undefined || raw === null) {
+    return mode === 'context_pack' ? DEFAULT_CONTEXT_DEPTH_CONTEXT_PACK : DEFAULT_CONTEXT_DEPTH_OTHER;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new Error(`context_depth must be an integer between 1 and ${MAX_CONTEXT_DEPTH}`);
+  }
+  if (n < 1 || n > MAX_CONTEXT_DEPTH) {
+    throw new Error(`context_depth must be between 1 and ${MAX_CONTEXT_DEPTH}`);
+  }
+  return n;
+}
+
+function parseRecipientType(raw: string | undefined): RecipientType {
+  const value = (raw || 'peer').trim().toLowerCase();
+  if (!RECIPIENT_TYPES.includes(value as RecipientType)) {
+    throw new Error(`recipient_type must be one of: ${RECIPIENT_TYPES.join(', ')}`);
+  }
+  return value as RecipientType;
+}
+
+function normalizeWikiTarget(raw: string): string {
+  const withoutAlias = raw.split('|')[0] ?? raw;
+  const withoutAnchor = withoutAlias.split('#')[0] ?? withoutAlias;
+  return withoutAnchor.trim();
+}
+
+function toNoteRid(notePath: string): string {
+  return `orn:obsidian.note:${notePath}`;
+}
+
+function stripFrontmatter(md: string): { body: string; frontmatter: Record<string, unknown> | null } {
+  const match = md.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!match) return { body: md, frontmatter: null };
+  try {
+    return {
+      body: md.slice(match[0].length),
+      frontmatter: YAML.parse(match[1]) as Record<string, unknown>,
+    };
+  } catch {
+    return { body: md.slice(match[0].length), frontmatter: null };
+  }
+}
+
+function collectFrontmatterStringRefs(value: unknown, out: string[]): void {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    // Capture explicit wikilinks in frontmatter.
+    const wikiMatches = [...trimmed.matchAll(/\[\[([^\]]+)\]\]/g)];
+    if (wikiMatches.length > 0) {
+      for (const m of wikiMatches) {
+        const target = normalizeWikiTarget(m[1] ?? '');
+        if (target) out.push(target);
+      }
+      return;
+    }
+    // Capture path-like references commonly used in metadata.
+    if (trimmed.endsWith('.md') || trimmed.includes('/')) {
+      out.push(trimmed);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectFrontmatterStringRefs(item, out);
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      collectFrontmatterStringRefs(item, out);
+    }
+  }
+}
+
+function sanitizeLocalLinkTarget(raw: string): string | null {
+  let target = raw.trim();
+  if (!target) return null;
+
+  if (target.startsWith('<') && target.endsWith('>') && target.length > 2) {
+    target = target.slice(1, -1).trim();
+  }
+
+  try {
+    target = decodeURIComponent(target);
+  } catch {
+    // Keep raw target if URL-decoding fails.
+  }
+
+  // External URLs / mailto / anchors are references, but not local note dependencies.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target)) return null;
+  if (target.startsWith('#')) return null;
+
+  target = target.split('#')[0]?.split('?')[0]?.trim() || '';
+  if (!target) return null;
+
+  return target.replace(/\\/g, '/');
+}
+
+async function buildVaultMarkdownBasenameIndex(vaultRoot: string): Promise<Map<string, string[]>> {
+  const index = new Map<string, string[]>();
+
+  async function walk(relDir: string): Promise<void> {
+    const absDir = relDir ? path.join(vaultRoot, relDir) : vaultRoot;
+    let entries: Array<import('node:fs').Dirent> = [];
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        await walk(relPath);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
+
+      const normalized = relPath.replace(/\\/g, '/');
+      const key = path.basename(normalized).toLowerCase();
+      const bucket = index.get(key) || [];
+      bucket.push(normalized);
+      index.set(key, bucket);
+    }
+  }
+
+  await walk('');
+  return index;
+}
+
+async function resolveLocalNoteTarget(
+  sourceDocPath: string,
+  rawTarget: string,
+  basenameIndex: Map<string, string[]>
+): Promise<{ resolvedPath?: string; exists: boolean }> {
+  const sanitized = sanitizeLocalLinkTarget(rawTarget);
+  if (!sanitized) return { exists: false };
+
+  const hasExt = path.extname(sanitized) !== '';
+  const relativeBase = sanitized.startsWith('/')
+    ? sanitized.slice(1)
+    : path.normalize(path.join(path.dirname(sourceDocPath), sanitized));
+
+  const candidateSet = new Set<string>();
+  if (hasExt) {
+    candidateSet.add(relativeBase);
+  } else {
+    candidateSet.add(`${relativeBase}.md`);
+  }
+
+  // Obsidian-style fallback: [[Note Title]] can resolve by filename anywhere in the vault.
+  if (!sanitized.includes('/') && !hasExt) {
+    const key = `${sanitized.toLowerCase()}.md`;
+    for (const rel of basenameIndex.get(key) || []) {
+      candidateSet.add(rel);
+    }
+  }
+
+  for (const candidateRaw of candidateSet) {
+    const candidate = candidateRaw.replace(/\\/g, '/');
+    let absolute = '';
+    try {
+      absolute = safeVaultPath(candidate);
+    } catch {
+      continue;
+    }
+    try {
+      await fs.access(absolute);
+      return { resolvedPath: candidate, exists: true };
+    } catch {
+      // Keep trying.
+    }
+  }
+
+  return { exists: false };
+}
+
+function extractReferencesFromMarkdown(
+  sourceDocPath: string,
+  sourceDepth: number,
+  markdown: string
+): ShareRef[] {
+  const { body, frontmatter } = stripFrontmatter(markdown);
+  const refs: ShareRef[] = [];
+  const sourceRid = toNoteRid(sourceDocPath);
+
+  const appendRef = (rawTarget: string, linkType: ShareLinkType, required: boolean): void => {
+    if (!rawTarget) return;
+    refs.push({
+      raw_target: rawTarget,
+      link_type: linkType,
+      required,
+      source_path: sourceDocPath,
+      source_rid: sourceRid,
+      source_depth: sourceDepth,
+    });
+  };
+
+  for (const m of body.matchAll(/!\[\[([^\]]+)\]\]/g)) {
+    const target = normalizeWikiTarget(m[1] ?? '');
+    appendRef(target, 'embed', true);
+  }
+
+  for (const m of body.matchAll(/\[\[([^\]]+)\]\]/g)) {
+    const matchStart = m.index ?? 0;
+    if (matchStart > 0 && body[matchStart - 1] === '!') continue;
+    const target = normalizeWikiTarget(m[1] ?? '');
+    appendRef(target, 'wikilink', false);
+  }
+
+  for (const m of body.matchAll(/(!?)\[[^\]]*]\(([^)]+)\)/g)) {
+    const isEmbed = m[1] === '!';
+    const target = sanitizeLocalLinkTarget(m[2] ?? '');
+    if (!target) continue;
+    appendRef(target, isEmbed ? 'markdown_embed' : 'markdown_link', isEmbed);
+  }
+
+  const fmRefs: string[] = [];
+  if (frontmatter) collectFrontmatterStringRefs(frontmatter, fmRefs);
+  for (const target of fmRefs) {
+    appendRef(target, 'frontmatter', false);
+  }
+
+  const dedup = new Map<string, ShareRef>();
+  for (const ref of refs) {
+    const key = `${(ref.source_path || '').toLowerCase()}:${ref.link_type}:${ref.raw_target.toLowerCase()}`;
+    const existing = dedup.get(key);
+    if (!existing) {
+      dedup.set(key, ref);
+      continue;
+    }
+    existing.required = existing.required || ref.required;
+  }
+
+  return [...dedup.values()];
+}
+
+async function buildSharePayload(
+  docPath: string,
+  mode: ShareMode,
+  optionalLimit: number,
+  contextDepth: number
+): Promise<{ contents: Record<string, unknown>; references: ShareRef[]; dependencyGraph: ShareDependencyGraph }> {
+  const normalizedDocPath = docPath.replace(/\\/g, '/');
+  const rootFullPath = safeVaultPath(normalizedDocPath);
+  const rootMarkdown = await fs.readFile(rootFullPath, 'utf-8');
+  const basenameIndex = await buildVaultMarkdownBasenameIndex(getVaultPath());
+
+  const docContentCache = new Map<string, string>();
+  docContentCache.set(normalizedDocPath, rootMarkdown);
+
+  const getDocContent = async (docPathRel: string): Promise<string> => {
+    const cached = docContentCache.get(docPathRel);
+    if (cached !== undefined) return cached;
+    const abs = safeVaultPath(docPathRel);
+    const content = await fs.readFile(abs, 'utf-8');
+    docContentCache.set(docPathRel, content);
+    return content;
+  };
+
+  const allRefs: ShareRef[] = [];
+  const dependencyDocs: ShareDependencyDoc[] = [];
+  const graphEdges: ShareGraphEdge[] = [];
+  const graphNodes = new Map<string, ShareGraphNode>();
+  const includedPaths = new Set<string>();
+  const processedPaths = new Set<string>();
+  const queuedPaths = new Set<string>();
+  const traversalQueue: Array<{ docPath: string; depth: number; parentPath?: string; parentRid?: string }> = [];
+
+  graphNodes.set(normalizedDocPath, {
+    rid: toNoteRid(normalizedDocPath),
+    vault_path: normalizedDocPath,
+    depth: 0,
+    included: true,
+    role: 'root',
+  });
+  traversalQueue.push({ docPath: normalizedDocPath, depth: 0 });
+  queuedPaths.add(normalizedDocPath);
+
+  let optionalIncluded = 0;
+  let currentBytes = Buffer.byteLength(rootMarkdown, 'utf-8');
+  let maxDepthReached = 0;
+
+  const addGraphNode = (docPathRel: string, depth: number, included: boolean): void => {
+    const rid = toNoteRid(docPathRel);
+    const existing = graphNodes.get(docPathRel);
+    if (!existing) {
+      graphNodes.set(docPathRel, {
+        rid,
+        vault_path: docPathRel,
+        depth,
+        included,
+        role: docPathRel === normalizedDocPath ? 'root' : 'dependency',
+      });
+      return;
+    }
+    if (depth < existing.depth) existing.depth = depth;
+    if (included) existing.included = true;
+  };
+
+  while (traversalQueue.length > 0) {
+    const current = traversalQueue.shift()!;
+    if (processedPaths.has(current.docPath)) continue;
+    processedPaths.add(current.docPath);
+    if (current.depth > maxDepthReached) maxDepthReached = current.depth;
+
+    let sourceMarkdown = '';
+    try {
+      sourceMarkdown = await getDocContent(current.docPath);
+    } catch {
+      continue;
+    }
+
+    const refs = extractReferencesFromMarkdown(current.docPath, current.depth, sourceMarkdown);
+    for (const ref of refs) {
+      const resolved = await resolveLocalNoteTarget(current.docPath, ref.raw_target, basenameIndex);
+      if (resolved.exists && resolved.resolvedPath && resolved.resolvedPath.toLowerCase().endsWith('.md')) {
+        ref.exists = true;
+        ref.resolved_path = resolved.resolvedPath;
+        ref.ref_rid = toNoteRid(resolved.resolvedPath);
+        ref.target_depth = current.depth + 1;
+        addGraphNode(resolved.resolvedPath, current.depth + 1, false);
+      } else {
+        ref.exists = false;
+      }
+
+      const modeAllowsInclude = (() => {
+        if (mode === 'root_only') return false;
+        if (mode === 'root_plus_required') return ref.required;
+        if (ref.required) return true;
+        return optionalIncluded < optionalLimit;
+      })();
+
+      if (!modeAllowsInclude) {
+        ref.included = false;
+        ref.skip_reason = mode === 'context_pack' && !ref.required ? 'optional_limit' : 'mode';
+      } else if (!ref.exists || !ref.resolved_path || !ref.ref_rid) {
+        ref.included = false;
+        ref.skip_reason = 'unresolved';
+      } else if (includedPaths.has(ref.resolved_path)) {
+        ref.included = true;
+        ref.include_reason = 'dedup';
+      } else {
+        try {
+          const depContent = await getDocContent(ref.resolved_path);
+          const depBytes = Buffer.byteLength(depContent, 'utf-8');
+          if (currentBytes + depBytes > MAX_SHARE_PAYLOAD_BYTES) {
+            ref.included = false;
+            ref.skip_reason = 'payload_limit';
+          } else {
+            currentBytes += depBytes;
+            includedPaths.add(ref.resolved_path);
+            if (!ref.required) optionalIncluded += 1;
+
+            dependencyDocs.push({
+              rid: ref.ref_rid,
+              vault_path: ref.resolved_path,
+              content: depContent,
+              content_type: 'text/markdown',
+              depth: current.depth + 1,
+              required: ref.required,
+              parent_rid: ref.source_rid,
+              parent_path: ref.source_path,
+            });
+            ref.included = true;
+            ref.include_reason = ref.required ? 'required_reference' : 'context_pack_optional';
+            addGraphNode(ref.resolved_path, current.depth + 1, true);
+
+            const shouldTraverse = contextDepth > current.depth + 1;
+            if (shouldTraverse && !queuedPaths.has(ref.resolved_path)) {
+              traversalQueue.push({
+                docPath: ref.resolved_path,
+                depth: current.depth + 1,
+                parentPath: ref.source_path,
+                parentRid: ref.source_rid,
+              });
+              queuedPaths.add(ref.resolved_path);
+            }
+          }
+        } catch {
+          ref.included = false;
+          ref.skip_reason = 'read_failed';
+        }
+      }
+
+      allRefs.push(ref);
+      graphEdges.push({
+        source_rid: ref.source_rid || toNoteRid(current.docPath),
+        source_path: ref.source_path || current.docPath,
+        source_depth: ref.source_depth ?? current.depth,
+        raw_target: ref.raw_target,
+        link_type: ref.link_type,
+        required: ref.required,
+        target_rid: ref.ref_rid,
+        target_path: ref.resolved_path,
+        target_depth: ref.target_depth,
+        exists: Boolean(ref.exists),
+        included: Boolean(ref.included),
+        include_reason: ref.include_reason,
+        skip_reason: ref.skip_reason,
+      });
+    }
+  }
+
+  const missingReferences = graphEdges.filter((edge) => !edge.exists || !edge.included);
+  const excludedByReason: Record<string, number> = {};
+  for (const edge of missingReferences) {
+    const reason = edge.skip_reason || (!edge.exists ? 'unresolved' : 'excluded');
+    excludedByReason[reason] = (excludedByReason[reason] || 0) + 1;
+  }
+
+  const dependencyGraph: ShareDependencyGraph = {
+    max_depth_requested: contextDepth,
+    max_depth_reached: maxDepthReached,
+    nodes: [...graphNodes.values()].sort((a, b) => a.depth - b.depth || a.vault_path.localeCompare(b.vault_path)),
+    edges: graphEdges,
+    missing_references: missingReferences,
+    summary: {
+      total_references: graphEdges.length,
+      resolved_references: graphEdges.filter((edge) => edge.exists).length,
+      unresolved_references: graphEdges.filter((edge) => !edge.exists).length,
+      included_references: graphEdges.filter((edge) => edge.included).length,
+      missing_references: missingReferences.length,
+      required_missing: missingReferences.filter((edge) => edge.required).length,
+      optional_missing: missingReferences.filter((edge) => !edge.required).length,
+      excluded_by_reason: excludedByReason,
+    },
+  };
+
+  return {
+    contents: {
+      vault_path: normalizedDocPath,
+      content: rootMarkdown,
+      content_type: 'text/markdown',
+      share_mode: mode,
+      context_depth: contextDepth,
+      references: allRefs,
+      dependencies: dependencyDocs,
+      dependency_count: dependencyDocs.length,
+      dependency_graph: dependencyGraph,
+    },
+    references: allRefs,
+    dependencyGraph,
+  };
 }
 
 // =============================================================================
@@ -313,6 +863,126 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       properties: {},
     },
   },
+  {
+    name: 'share_document',
+    description:
+      'Share a document via KOI-net federation. Supports recipient_type=peer|commons and rich-share modes: root_only, root_plus_required, context_pack.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        document_path: {
+          type: 'string',
+          description:
+            'Path to the document in the vault (e.g. "Articles/My Research.md" or "projects/koi-protocol-comparison.md")',
+        },
+        recipient: {
+          type: 'string',
+          description:
+            'Human-friendly name or alias of the recipient node (e.g. "shawn", "cowichan"). Must match a registered peer alias or node name.',
+        },
+        recipient_type: {
+          type: 'string',
+          description:
+            'Recipient mode: peer (default) or commons. commons requests staged intake on the receiving commons node.',
+        },
+        message: {
+          type: 'string',
+          description: 'Optional message to include with the share (e.g. "Check this out — relevant to our project")',
+        },
+        mode: {
+          type: 'string',
+          description:
+            'Share mode: root_only (only selected doc), root_plus_required (doc + required embeds/transclusions), context_pack (doc + required + optional references)',
+        },
+        optional_limit: {
+          type: 'number',
+          description:
+            'When mode=context_pack, maximum number of optional referenced notes to include (default: 12)',
+        },
+        context_depth: {
+          type: 'number',
+          description:
+            'Depth for dependency traversal when building context packs (integer 1-4). Default: 2 for context_pack, otherwise 1.',
+        },
+      },
+      required: ['document_path', 'recipient'],
+    },
+  },
+  {
+    name: 'shared_with_me',
+    description:
+      'List documents shared with you by peers via KOI-net federation. Shows received documents with sender info and timestamps.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since: {
+          type: 'string',
+          description: 'ISO date string to filter documents received after this time (e.g. "2026-02-23")',
+        },
+        from_peer: {
+          type: 'string',
+          description: 'Filter by sender name or alias (e.g. "shawn")',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default: 50)',
+        },
+      },
+    },
+  },
+  {
+    name: 'commons_intake',
+    description:
+      'List staged/approved/rejected commons intake records on this node. Requires KOI commons intake migration.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          description: "Filter by intake status: staged (default), approved, rejected, or all",
+        },
+        from_peer: {
+          type: 'string',
+          description: 'Filter by sender name or alias',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default: 50)',
+        },
+      },
+    },
+  },
+  {
+    name: 'commons_intake_decide',
+    description:
+      'Approve or reject a staged commons intake item (localhost admin auth enforced by KOI API).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        share_id: {
+          type: 'number',
+          description: 'Local intake record id (preferred)',
+        },
+        event_id: {
+          type: 'string',
+          description: 'Fallback identifier if share_id is unknown',
+        },
+        action: {
+          type: 'string',
+          description: 'Decision action: approve or reject',
+        },
+        reviewer: {
+          type: 'string',
+          description: 'Optional reviewer name',
+        },
+        note: {
+          type: 'string',
+          description: 'Optional decision note',
+        },
+      },
+      required: ['action'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -474,6 +1144,113 @@ export async function handleKoiApiTool(
 
       case 'federation_status': {
         const { data } = await client.get('/koi-net/health');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'share_document': {
+        const docPath = args.document_path as string;
+        const recipient = args.recipient as string;
+        const message = args.message as string | undefined;
+        let recipientType: RecipientType = 'peer';
+        try {
+          recipientType = parseRecipientType(args.recipient_type as string | undefined);
+        } catch (recipientErr: any) {
+          return {
+            content: [{
+              type: 'text',
+              text: recipientErr?.message || 'Invalid recipient_type',
+            }],
+            isError: true,
+          };
+        }
+        const modeInput = ((args.mode as string | undefined) || 'root_plus_required').trim().toLowerCase();
+        if (!SHARE_MODES.includes(modeInput as ShareMode)) {
+          return {
+            content: [{
+              type: 'text',
+              text: `Invalid mode '${modeInput}'. Valid modes: ${SHARE_MODES.join(', ')}`,
+            }],
+            isError: true,
+          };
+        }
+        const shareMode = modeInput as ShareMode;
+        const optionalLimitRaw = args.optional_limit as number | undefined;
+        const optionalLimit = Number.isFinite(optionalLimitRaw as number)
+          ? Math.max(0, Number(optionalLimitRaw))
+          : DEFAULT_OPTIONAL_LIMIT;
+        let contextDepth = 1;
+        try {
+          contextDepth = parseContextDepth(args.context_depth as number | undefined, shareMode);
+        } catch (depthErr: any) {
+          return {
+            content: [{
+              type: 'text',
+              text: depthErr?.message || 'Invalid context_depth',
+            }],
+            isError: true,
+          };
+        }
+
+        // Build rich share payload from vault document and references
+        let contents: Record<string, unknown> | undefined;
+        let references: ShareRef[] | undefined;
+        try {
+          const built = await buildSharePayload(docPath, shareMode, optionalLimit, contextDepth);
+          contents = built.contents;
+          references = built.references;
+        } catch {
+          // If vault read fails, share without contents (metadata only).
+        }
+
+        const rid = `orn:obsidian.note:${docPath}`;
+        const { data } = await client.post('/koi-net/share', {
+          document_rid: rid,
+          recipient,
+          recipient_type: recipientType,
+          message,
+          share_mode: shareMode,
+          context_depth: contextDepth,
+          references,
+          contents,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'shared_with_me': {
+        const params = new URLSearchParams();
+        if (args.since) params.set('since', args.since as string);
+        if (args.from_peer) params.set('from_peer', args.from_peer as string);
+        if (args.limit) params.set('limit', String(args.limit));
+        const qs = params.toString();
+        const { data } = await client.get(`/koi-net/shared-with-me${qs ? '?' + qs : ''}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'commons_intake': {
+        const params = new URLSearchParams();
+        if (args.status) params.set('status', args.status as string);
+        if (args.from_peer) params.set('from_peer', args.from_peer as string);
+        if (args.limit) params.set('limit', String(args.limit));
+        const qs = params.toString();
+        const { data } = await client.get(`/koi-net/commons/intake${qs ? '?' + qs : ''}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'commons_intake_decide': {
+        const body: Record<string, unknown> = {
+          action: args.action,
+        };
+        if (args.share_id !== undefined) body.share_id = args.share_id;
+        if (args.event_id) body.event_id = args.event_id;
+        if (args.reviewer) body.reviewer = args.reviewer;
+        if (args.note) body.note = args.note;
+
+        const headers = await getKoiAdminAuthHeaders();
+        const { data } = await client.post(
+          '/koi-net/commons/intake/decide',
+          body,
+          headers ? { headers } : undefined
+        );
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
