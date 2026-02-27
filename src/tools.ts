@@ -1366,5 +1366,43 @@ Search for sessions that read/edited/wrote specific files.
         }
       }
     }
+  },
+  {
+    name: 'search_sessions_by_entity',
+    description: `Find sessions that mention a specific person, organization, project, or concept.
+
+Uses the personal knowledge graph to find sessions linked to entities via entity resolution.
+
+**Use cases:**
+- "What sessions mention Shawn Anderson?"
+- "Sessions related to IndigenomicsAI"
+- "When did I discuss the KOI project?"
+
+**Examples:**
+  search_sessions_by_entity(entity_name="Darren Zal")
+  search_sessions_by_entity(entity_name="IndigenomicsAI", entity_type="Organization")
+  search_sessions_by_entity(entity_name="Shawn Anderson", limit=5)`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity_name: {
+          type: 'string',
+          description: 'Entity name to search for (e.g., "Darren Zal", "IndigenomicsAI")'
+        },
+        entity_type: {
+          type: 'string',
+          description: 'Optional entity type filter: Person, Organization, Project, Concept',
+          enum: ['Person', 'Organization', 'Project', 'Concept']
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results to return (default: 10)',
+          default: 10,
+          minimum: 1,
+          maximum: 50
+        }
+      },
+      required: ['entity_name']
+    }
   }
 ];

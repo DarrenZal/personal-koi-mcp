@@ -100,8 +100,31 @@ vault_list_notes(folder="Meetings", limit=20)
 vault_prep_meeting(attendees=["John Smith", "Jane Doe"], project="Project X")
 ```
 
+## Session Tools
+
+| Tool | Description |
+|------|-------------|
+| `search_sessions` | Semantic search over Claude Code session transcripts |
+| `get_session_stats` | Statistics about indexed sessions |
+| `search_sessions_by_tool` | Find sessions by tool/MCP server usage |
+| `search_sessions_by_files` | Find sessions by files accessed |
+| `search_sessions_by_entity` | Find sessions mentioning a person, org, project, or concept |
+
+### Session-Entity Query Example
+
+```
+# Find sessions where Shawn Anderson was discussed
+search_sessions_by_entity(entity_name="Shawn Anderson")
+
+# Find sessions about a specific org
+search_sessions_by_entity(entity_name="IndigenomicsAI", entity_type="Organization")
+```
+
+The `search_sessions_by_entity` tool uses read-only entity resolution (exact + alias + fuzzy match only) — it will not create phantom entities from search queries.
+
 ## Related Projects
 
 - **koi-sensors/sensors/obsidian**: Sensor that indexes vault to KOI graph
+- **koi-sensors/sensors/claude_sessions**: Session sensor with entity extraction
 - **MycoMind**: AI entity extraction and graph DB tools
 - **regen-koi-mcp**: Original Regen KOI MCP (this is a fork)

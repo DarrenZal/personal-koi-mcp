@@ -492,6 +492,9 @@ class KOIServer {
           case 'search_sessions_by_files':
             result = await this.searchSessionsByFiles(args as { path_contains?: string; limit?: number });
             break;
+          case 'search_sessions_by_entity':
+            result = await this.searchSessionsByEntity(args as { entity_name: string; entity_type?: string; limit?: number });
+            break;
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -5640,6 +5643,97 @@ Your feedback helps improve KOI for everyone.${
         content: [{
           type: 'text',
           text: `Error searching sessions by files: ${errorMessage}\n\nMake sure the personal KOI backend is running.`
+        }]
+      };
+    }
+  }
+
+  private async searchSessionsByEntity(args: { entity_name: string; entity_type?: string; limit?: number }): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const { entity_name, entity_type, limit = 10 } = args;
+
+    try {
+      const backendUrl = process.env.KOI_BACKEND_URL || 'http://localhost:8351';
+      const params = new URLSearchParams();
+      params.append('entity_name', entity_name);
+      if (entity_type) params.append('entity_type', entity_type);
+      params.append('limit', limit.toString());
+
+      const response = await fetch(`${backendUrl}/search-sessions-by-entity?${params}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          content: [{
+            type: 'text',
+            text: `Error searching sessions by entity: ${response.status} - ${errorText}`
+          }]
+        };
+      }
+
+      interface EntitySessionResult {
+        session_id: string;
+        summary?: string;
+        first_prompt?: string;
+        created_at?: string;
+        last_ingested_at?: string;
+        mention_count: number;
+        context?: string;
+      }
+
+      const data = await response.json() as {
+        entity_found: boolean;
+        entity_uri?: string;
+        entity_name?: string;
+        sessions: EntitySessionResult[];
+        count: number;
+      };
+
+      if (!data.entity_found) {
+        return {
+          content: [{
+            type: 'text',
+            text: `No entity found matching "${entity_name}"${entity_type ? ` (type: ${entity_type})` : ''}.\n\nThe entity may not exist in the knowledge graph, or the name may be spelled differently.`
+          }]
+        };
+      }
+
+      if (data.sessions.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Entity "${entity_name}" found (URI: \`${data.entity_uri}\`) but no sessions mention it yet.\n\nSessions need to be processed by the sensor with entity extraction enabled.`
+          }]
+        };
+      }
+
+      let output = `# Sessions mentioning "${entity_name}"\n\n`;
+      output += `**Entity URI**: \`${data.entity_uri}\`\n`;
+      output += `Found ${data.count} sessions:\n\n`;
+
+      for (const session of data.sessions) {
+        const date = session.last_ingested_at ? new Date(session.last_ingested_at).toLocaleDateString() : 'Unknown date';
+        output += `---\n\n`;
+        output += `## ${session.summary || 'Untitled'}\n`;
+        output += `**Date**: ${date} | **Mentions**: ${session.mention_count}\n`;
+        output += `**Session ID**: \`${session.session_id}\`\n\n`;
+
+        if (session.first_prompt) {
+          output += `**First prompt**: ${session.first_prompt}\n\n`;
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        content: [{
+          type: 'text',
+          text: `Error searching sessions by entity: ${errorMessage}\n\nMake sure the personal KOI backend is running on port 8351.`
         }]
       };
     }
