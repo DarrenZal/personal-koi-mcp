@@ -251,6 +251,7 @@ Register a vault entity note in the backend.
   "canonical_uri": "orn:personal-koi.entity:person-clare-attwell-abc123",
   "is_new": false,
   "merged_with": null,
+  "collision_warning": null,
   "vault_rid": "orn:regen.document:obsidian/People/Clare-Attwell"
 }
 ```

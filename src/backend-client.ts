@@ -141,6 +141,7 @@ export interface RegisterEntityResponse {
   is_new: boolean;
   vault_rid: string;
   merged_with?: string;
+  collision_warning?: string;
 }
 
 export interface VaultEntityMapping {

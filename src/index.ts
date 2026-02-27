@@ -4889,6 +4889,9 @@ Your feedback helps improve KOI for everyone.${
       if (response.merged_with) {
         output += `**Merged with:** ${response.merged_with}\n`;
       }
+      if (response.collision_warning) {
+        output += `\n> ⚠️ **Collision Warning:** ${response.collision_warning}\n`;
+      }
       if (updateFrontmatter) {
         output += `**Frontmatter:** Updated with koi: metadata\n`;
       }
@@ -4983,6 +4986,7 @@ Your feedback helps improve KOI for everyone.${
         updated: 0,
         skipped: 0,
         errors: 0,
+        collisions: [] as string[],
         byType: {} as Record<string, number>
       };
 
@@ -5024,6 +5028,10 @@ Your feedback helps improve KOI for everyone.${
             results.registered++;
           } else {
             results.updated++;
+          }
+
+          if (response.collision_warning) {
+            results.collisions.push(response.collision_warning);
           }
 
           // Track by type
@@ -5090,6 +5098,13 @@ Your feedback helps improve KOI for everyone.${
         output += `## By Type\n`;
         for (const [type, count] of Object.entries(results.byType)) {
           output += `- ${type}: ${count}\n`;
+        }
+      }
+
+      if (results.collisions.length > 0) {
+        output += `\n## Collision Warnings (${results.collisions.length})\n`;
+        for (const warning of results.collisions) {
+          output += `- ⚠️ ${warning}\n`;
         }
       }
 
