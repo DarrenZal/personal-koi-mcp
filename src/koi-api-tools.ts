@@ -983,6 +983,174 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       required: ['action'],
     },
   },
+  // --- Claims Engine V1 tools ---
+  {
+    name: 'create_claim',
+    description:
+      'Create a new impact claim. Claims are structured assertions about environmental, social, or financial impact. The claimant must be an existing entity. Returns the created claim with its content-addressable RID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claimant_uri: {
+          type: 'string',
+          description: 'Entity URI of the claimant (must exist in entity_registry). Use resolve_entity to find it.',
+        },
+        statement: {
+          type: 'string',
+          description: 'Plain-language impact assertion (min 10 chars)',
+        },
+        claim_type: {
+          type: 'string',
+          enum: ['ecological', 'social', 'financial', 'governance'],
+          description: 'Type of impact claim (default: ecological)',
+        },
+        about_uri: {
+          type: 'string',
+          description: 'Optional entity URI this claim is about (Location, Organization, Project, etc.)',
+        },
+        source_document: {
+          type: 'string',
+          description: 'Document RID or path the claim was extracted from (for provenance)',
+        },
+        ai_confidence: {
+          type: 'number',
+          description: 'AI extraction confidence 0.0-1.0 (omit if manually created)',
+        },
+        supersedes_rid: {
+          type: 'string',
+          description: 'Previous version claim_rid (for versioning — creates supersedes_claim edge)',
+        },
+        metadata: {
+          type: 'object',
+          description: 'Extensible fields: quantity, unit, start_date, end_date, sdg_tags, methodology, theme_tags, etc.',
+        },
+      },
+      required: ['claimant_uri', 'statement'],
+    },
+  },
+  {
+    name: 'search_claims',
+    description:
+      'Search impact claims with optional filters. Filter by verification level (self_reported, peer_reviewed, verified, ledger_anchored), claim type, claimant, or about entity.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        verification: {
+          type: 'string',
+          description: 'Filter by verification level: self_reported, peer_reviewed, verified, ledger_anchored',
+        },
+        claim_type: {
+          type: 'string',
+          description: 'Filter by claim type: ecological, social, financial, governance',
+        },
+        claimant_uri: {
+          type: 'string',
+          description: 'Filter by claimant entity URI',
+        },
+        about_uri: {
+          type: 'string',
+          description: 'Filter by the entity the claim is about',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default: 50, max: 200)',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_claim',
+    description:
+      'Get a specific claim by its RID, including linked evidence entities.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claim_rid: {
+          type: 'string',
+          description: 'The claim RID (e.g. orn:koi-net.claim:abc123...)',
+        },
+      },
+      required: ['claim_rid'],
+    },
+  },
+  {
+    name: 'verify_claim',
+    description:
+      'Advance a claim\'s verification level. Valid transitions: self_reported→peer_reviewed→verified→ledger_anchored. Also: self_reported→withdrawn, peer_reviewed→withdrawn.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claim_rid: {
+          type: 'string',
+          description: 'The claim RID to verify',
+        },
+        new_level: {
+          type: 'string',
+          enum: ['peer_reviewed', 'verified', 'ledger_anchored', 'withdrawn'],
+          description: 'Target verification level',
+        },
+        actor: {
+          type: 'string',
+          description: 'Who is performing the verification',
+        },
+        reason: {
+          type: 'string',
+          description: 'Reason for the verification transition',
+        },
+      },
+      required: ['claim_rid', 'new_level'],
+    },
+  },
+  {
+    name: 'extract_claims',
+    description:
+      'Extract structured impact claims from document text using AI. Returns candidate claims with confidence scores. Set auto_create=true to automatically persist extracted claims.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        document_text: {
+          type: 'string',
+          description: 'Document text to extract claims from (min 50 chars)',
+        },
+        source_document: {
+          type: 'string',
+          description: 'Document RID or path (required for provenance tracking)',
+        },
+        auto_create: {
+          type: 'boolean',
+          description: 'If true, automatically create claims from extraction (default: false)',
+        },
+        confidence_threshold: {
+          type: 'number',
+          description: 'Minimum confidence for extraction (default: 0.7)',
+        },
+      },
+      required: ['document_text', 'source_document'],
+    },
+  },
+  {
+    name: 'link_evidence',
+    description:
+      'Attach an evidence entity to a claim. The evidence must be an existing entity in the knowledge graph. Creates an evidences_claim relationship edge.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claim_rid: {
+          type: 'string',
+          description: 'The claim RID to attach evidence to',
+        },
+        evidence_uri: {
+          type: 'string',
+          description: 'Entity URI of the evidence (must exist in entity_registry)',
+        },
+        actor: {
+          type: 'string',
+          description: 'Who is linking the evidence',
+        },
+      },
+      required: ['claim_rid', 'evidence_uri'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -1251,6 +1419,72 @@ export async function handleKoiApiTool(
           body,
           headers ? { headers } : undefined
         );
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      // --- Claims Engine V1 handlers ---
+      case 'create_claim': {
+        const body: Record<string, unknown> = {
+          claimant_uri: args.claimant_uri,
+          statement: args.statement,
+        };
+        if (args.claim_type) body.claim_type = args.claim_type;
+        if (args.about_uri) body.about_uri = args.about_uri;
+        if (args.source_document) body.source_document = args.source_document;
+        if (args.ai_confidence !== undefined) body.ai_confidence = args.ai_confidence;
+        if (args.supersedes_rid) body.supersedes_rid = args.supersedes_rid;
+        if (args.metadata) body.metadata = args.metadata;
+        const { data } = await client.post('/claims/', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'search_claims': {
+        const params = new URLSearchParams();
+        if (args.verification) params.set('verification', args.verification as string);
+        if (args.claim_type) params.set('claim_type', args.claim_type as string);
+        if (args.claimant_uri) params.set('claimant_uri', args.claimant_uri as string);
+        if (args.about_uri) params.set('about_uri', args.about_uri as string);
+        if (args.limit) params.set('limit', String(args.limit));
+        const qs = params.toString();
+        const { data } = await client.get(`/claims/${qs ? '?' + qs : ''}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_claim': {
+        const rid = args.claim_rid as string;
+        const { data } = await client.get(`/claims/${encodeURIComponent(rid)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'verify_claim': {
+        const rid = args.claim_rid as string;
+        const body: Record<string, unknown> = {
+          new_level: args.new_level,
+        };
+        if (args.actor) body.actor = args.actor;
+        if (args.reason) body.reason = args.reason;
+        const { data } = await client.patch(`/claims/${encodeURIComponent(rid)}/verify`, body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'extract_claims': {
+        const body: Record<string, unknown> = {
+          document_text: args.document_text,
+          source_document: args.source_document,
+        };
+        if (args.auto_create !== undefined) body.auto_create = args.auto_create;
+        if (args.confidence_threshold !== undefined) body.confidence_threshold = args.confidence_threshold;
+        const { data } = await client.post('/claims/extract', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'link_evidence': {
+        const rid = args.claim_rid as string;
+        const body: Record<string, unknown> = {
+          evidence_uri: args.evidence_uri,
+        };
+        if (args.actor) body.actor = args.actor;
+        const { data } = await client.post(`/claims/${encodeURIComponent(rid)}/evidence`, body);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
