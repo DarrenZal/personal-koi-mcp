@@ -1154,13 +1154,28 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'anchor_claim',
     description:
-      'Anchor a verified claim on the Regen Ledger testnet. The claim must be at "verified" state (self_reported → peer_reviewed → verified → ledger_anchored). Broadcasts MsgAnchor to the regen-upgrade testnet and transitions the claim to ledger_anchored.',
+      'Anchor a verified claim on the Regen Ledger testnet. The claim must be at "verified" state (self_reported → peer_reviewed → verified → ledger_anchored). Broadcasts MsgAnchor to the regen-upgrade testnet and transitions the claim to ledger_anchored. May return a pending status (202) if the transaction broadcast succeeded but on-chain confirmation timed out — in that case, use reconcile_claim to finalize.',
     inputSchema: {
       type: 'object',
       properties: {
         claim_rid: {
           type: 'string',
           description: 'The claim RID to anchor on-chain',
+        },
+      },
+      required: ['claim_rid'],
+    },
+  },
+  {
+    name: 'reconcile_claim',
+    description:
+      'Check the on-chain status of a claim whose anchor broadcast timed out (has tx_hash but is still at "verified" state). Queries the transaction on-chain and transitions to ledger_anchored if confirmed, or returns pending/failed status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claim_rid: {
+          type: 'string',
+          description: 'The claim RID to reconcile',
         },
       },
       required: ['claim_rid'],
@@ -1505,7 +1520,20 @@ export async function handleKoiApiTool(
 
       case 'anchor_claim': {
         const rid = args.claim_rid as string;
-        const { data } = await client.post(`/claims/${encodeURIComponent(rid)}/anchor`);
+        const resp = await client.post(`/claims/${encodeURIComponent(rid)}/anchor`, undefined, {
+          validateStatus: (s: number) => s === 200 || s === 202,
+        });
+        const data = resp.data;
+        if (resp.status === 202 || data?.status === 'pending') {
+          const msg = data?.message || 'Anchor broadcast pending — call reconcile to finalize.';
+          return { content: [{ type: 'text', text: `⏳ Anchor pending:\n${msg}\n\n${JSON.stringify(data, null, 2)}` }] };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'reconcile_claim': {
+        const rid = args.claim_rid as string;
+        const { data } = await client.post(`/claims/${encodeURIComponent(rid)}/reconcile`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

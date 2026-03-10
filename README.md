@@ -145,6 +145,24 @@ vault_ingest_extraction({
 // Result: Resolves to "Shawn Anderson" @ 93.4% confidence
 ```
 
+### Claims Engine
+
+| Tool | Description |
+|------|-------------|
+| `create_claim` | Create impact claim (entity registered in graph) |
+| `get_claim` | Get claim with linked evidence |
+| `search_claims` | Search by type, claimant, verification state |
+| `verify_claim` | Advance verification: self_reported → peer_reviewed → verified → ledger_anchored |
+| `link_evidence` | Attach evidence entity to claim |
+| `extract_claims` | AI extraction of claims from document text |
+| `anchor_claim` | Anchor verified claim on Regen Ledger (returns 202 pending for async polling) |
+| `reconcile_claim` | Check on-chain status of pending broadcast |
+
+**Testing:**
+```bash
+npm run test:claims  # 8-tool MCP smoke test via handleKoiApiTool()
+```
+
 ## Architecture
 
 This local setup is a 3-repository stack:

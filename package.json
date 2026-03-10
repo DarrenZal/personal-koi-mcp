@@ -21,6 +21,7 @@
     "setup": "node scripts/setup.js",
     "login": "tsx src/scripts/login.ts",
     "test:contract": "tsx evals/contract_query_code_graph_query_types.ts",
+    "test:claims": "tsx evals/claims_smoke.ts",
     "install-all": "./setup.sh",
     "prepublishOnly": "npm run clean && npm run build"
   },
