@@ -1151,6 +1151,21 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       required: ['claim_rid', 'evidence_uri'],
     },
   },
+  {
+    name: 'anchor_claim',
+    description:
+      'Anchor a verified claim on the Regen Ledger testnet. The claim must be at "verified" state (self_reported → peer_reviewed → verified → ledger_anchored). Broadcasts MsgAnchor to the regen-upgrade testnet and transitions the claim to ledger_anchored.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claim_rid: {
+          type: 'string',
+          description: 'The claim RID to anchor on-chain',
+        },
+      },
+      required: ['claim_rid'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -1485,6 +1500,12 @@ export async function handleKoiApiTool(
         };
         if (args.actor) body.actor = args.actor;
         const { data } = await client.post(`/claims/${encodeURIComponent(rid)}/evidence`, body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'anchor_claim': {
+        const rid = args.claim_rid as string;
+        const { data } = await client.post(`/claims/${encodeURIComponent(rid)}/anchor`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
