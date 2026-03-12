@@ -1181,6 +1181,49 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       required: ['claim_rid'],
     },
   },
+
+  // --- Hackathon Extension: Commitment Routing (Mar 2026) ---
+
+  {
+    name: 'draft_commitment_from_text',
+    description:
+      'Parse natural language text describing a commitment into a structured draft object using LLM extraction. Returns a CommitmentCreateRequest-shaped draft for human review — nothing is persisted. The caller should review and optionally edit the draft before creating the commitment via the commitments API.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: {
+          type: 'string',
+          description:
+            'Natural language description of a commitment (e.g. "I can offer 20 hours of permaculture design consultation for projects in the Cascadia bioregion through June 2026")',
+        },
+        pledger_uri: {
+          type: 'string',
+          description: 'Optional: entity URI of the pledger if already known',
+        },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'suggest_pool_routes',
+    description:
+      'Get routing suggestions for a commitment draft or existing commitment. Returns scored pool matches based on offer type, bioregion, tags, and existing pool demand. Uses the KOI API commitment routing scorer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        draft: {
+          type: 'object',
+          description:
+            'A commitment draft object (as returned by draft_commitment_from_text). Provide either this or commitment_rid.',
+        },
+        commitment_rid: {
+          type: 'string',
+          description:
+            'RID of an existing commitment to fetch and score. Provide either this or draft.',
+        },
+      },
+    },
+  },
 ];
 
 // =============================================================================
@@ -1534,6 +1577,124 @@ export async function handleKoiApiTool(
       case 'reconcile_claim': {
         const rid = args.claim_rid as string;
         const { data } = await client.post(`/claims/${encodeURIComponent(rid)}/reconcile`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      // --- Hackathon Extension: Commitment Routing (Mar 2026) ---
+
+      case 'draft_commitment_from_text': {
+        const text = args.text as string;
+        const pledgerUri = (args.pledger_uri as string) || '';
+
+        const openaiKey = process.env.OPENAI_API_KEY;
+        if (!openaiKey) {
+          return {
+            content: [{ type: 'text', text: 'OPENAI_API_KEY not set — cannot parse commitment text.' }],
+            isError: true,
+          };
+        }
+
+        const systemPrompt = `You are a commitment parser for a bioregional knowledge commons. Given natural language text describing a commitment (an offer of labor, goods, service, knowledge, or stewardship), extract a structured JSON object.
+
+Output ONLY valid JSON matching this shape:
+{
+  "pledger_uri": "entity URI if identifiable, else empty string",
+  "title": "short title (under 80 chars)",
+  "description": "the full original text",
+  "offer_type": "labor|goods|service|knowledge|stewardship",
+  "quantity": null or number,
+  "unit": null or string (e.g. "hours", "kg", "sessions"),
+  "validity_start": null or ISO date string,
+  "validity_end": null or ISO date string,
+  "metadata": {
+    "wants": ["list of things the pledger wants in return, if expressed"],
+    "limits": ["list of constraints or limits expressed"],
+    "bioregion_uri": "entity URI or name of bioregion if identifiable, else empty string",
+    "estimated_value_usd": null or number,
+    "routing_tags": ["inferred topic/domain tags for matching"]
+  }
+}
+
+Rules:
+- offer_type must be exactly one of: labor, goods, service, knowledge, stewardship
+- If dates are relative (e.g. "through June"), interpret relative to today
+- routing_tags should include 2-5 relevant domain keywords for pool matching
+- Do not invent information not present in the text`;
+
+        const userPrompt = pledgerUri
+          ? `Pledger URI: ${pledgerUri}\n\nCommitment text: ${text}`
+          : `Commitment text: ${text}`;
+
+        const openaiResp = await axios.post(
+          'https://api.openai.com/v1/chat/completions',
+          {
+            model: 'gpt-4o-mini',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${openaiKey}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000,
+          }
+        );
+
+        const rawContent = (openaiResp.data as any)?.choices?.[0]?.message?.content;
+        if (!rawContent) {
+          return {
+            content: [{ type: 'text', text: 'LLM returned empty response — could not parse commitment.' }],
+            isError: true,
+          };
+        }
+
+        const draft = JSON.parse(rawContent);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Draft commitment (NOT persisted — review before creating):\n\n${JSON.stringify(draft, null, 2)}`,
+            },
+          ],
+        };
+      }
+
+      case 'suggest_pool_routes': {
+        const draft = args.draft as Record<string, unknown> | undefined;
+        const commitmentRid = args.commitment_rid as string | undefined;
+
+        if (!draft && !commitmentRid) {
+          return {
+            content: [{ type: 'text', text: 'Provide either "draft" (commitment object) or "commitment_rid".' }],
+            isError: true,
+          };
+        }
+
+        let routingPayload: Record<string, unknown>;
+        if (commitmentRid) {
+          // Fetch the existing commitment and reshape into RoutingSuggestionRequest
+          const { data: commitment } = await client.get(`/commitments/${encodeURIComponent(commitmentRid)}`);
+          routingPayload = {
+            pledger_uri: commitment.pledger_uri,
+            title: commitment.title,
+            offer_type: commitment.offer_type,
+            quantity: commitment.quantity,
+            unit: commitment.unit,
+            validity_start: commitment.validity_start,
+            validity_end: commitment.validity_end,
+            metadata: commitment.metadata || {},
+          };
+        } else {
+          // Draft is already shaped like RoutingSuggestionRequest — send directly
+          routingPayload = draft!;
+        }
+
+        const { data } = await client.post('/commitments/routing-suggestions', routingPayload);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
