@@ -122,6 +122,14 @@ search_sessions_by_entity(entity_name="IndigenomicsAI", entity_type="Organizatio
 
 The `search_sessions_by_entity` tool uses read-only entity resolution (exact + alias + fuzzy match only) — it will not create phantom entities from search queries.
 
+## Dynamic Query Tool
+
+| Tool | Description |
+|------|-------------|
+| `koi_query` | Execute read-only SQL against the knowledge graph (10-table whitelist, parameterized queries only) |
+
+The `koi_query` tool calls `POST /sql` on the koi-processor backend. Defense-in-depth: client-side SELECT/WITH pre-validation in the MCP handler, plus server-side guardrails (table whitelist, read-only transaction, 5s timeout, parameterization enforcement). Requires `QUERY_ENDPOINT_ENABLED=true` on the backend.
+
 ## Related Projects
 
 - **koi-sensors/sensors/obsidian**: Sensor that indexes vault to KOI graph

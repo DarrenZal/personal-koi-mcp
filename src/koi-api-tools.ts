@@ -1224,6 +1224,189 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       },
     },
   },
+  // --- 4 Task management tools ---
+  {
+    name: 'task_dashboard',
+    description:
+      'Get a task management dashboard with summary statistics and inbox preview. Returns counts by status, overdue/due-today/due-this-week numbers, and the first 5 inbox tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'task_list',
+    description:
+      'List tasks with optional filters. Returns an array of task records.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          description: 'Filter by status. Comma-separated for multiple: "inbox", "open,in-progress"',
+        },
+        priority: {
+          type: 'string',
+          description: 'Filter by priority: "critical", "high", "medium", "low". Comma-separated for multiple.',
+        },
+        owner: {
+          type: 'string',
+          description: 'Filter by owner name (substring match)',
+        },
+        project: {
+          type: 'string',
+          description: 'Filter by project name',
+        },
+        due_before: {
+          type: 'string',
+          description: 'ISO date YYYY-MM-DD — tasks due before this date',
+        },
+        due_after: {
+          type: 'string',
+          description: 'ISO date YYYY-MM-DD — tasks due after this date',
+        },
+        source_type: {
+          type: 'string',
+          description: 'Filter by source type: "meeting", "personal"',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results to return (default 100)',
+        },
+      },
+    },
+  },
+  {
+    name: 'task_add',
+    description:
+      'Create a new task or update an existing one (idempotent by taskKey). Returns the task key, action taken, and ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Task title',
+        },
+        taskKey: {
+          type: 'string',
+          description: 'Idempotency key, e.g. "personal-2026-03-14-fix-wireguard"',
+        },
+        status: {
+          type: 'string',
+          description: 'Task status (default: "inbox")',
+        },
+        priority: {
+          type: 'string',
+          description: 'Priority level (default: "medium")',
+        },
+        dueDate: {
+          type: 'string',
+          description: 'Due date in ISO format YYYY-MM-DD',
+        },
+        ownerWikilink: {
+          type: 'string',
+          description: 'Owner as wikilink "[[People/Name]]" or plain "Name"',
+        },
+        projectWikilink: {
+          type: 'string',
+          description: 'Project as wikilink "[[Projects/Name]]" or plain "Name"',
+        },
+        sourceType: {
+          type: 'string',
+          description: 'Source type (default: "personal")',
+        },
+        context: {
+          type: 'string',
+          description: 'Description or notes',
+        },
+        effort: {
+          type: 'string',
+          description: 'Effort estimate',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Arbitrary tags',
+        },
+        blockedBy: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Task keys that block this task',
+        },
+      },
+      required: ['title', 'taskKey'],
+    },
+  },
+  {
+    name: 'task_update',
+    description:
+      'Update specific fields of an existing task. Only provided fields are changed; absent fields are preserved. Auto-timestamps handled server-side.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskKey: {
+          type: 'string',
+          description: 'The task key to update',
+        },
+        status: {
+          type: 'string',
+          description: 'New status: "open", "in-progress", "done", "cancelled", "waiting"',
+        },
+        priority: {
+          type: 'string',
+          description: 'New priority level',
+        },
+        dueDate: {
+          type: ['string', 'null'],
+          description: 'New due date (YYYY-MM-DD) or null to clear',
+        },
+        ownerWikilink: {
+          type: 'string',
+          description: 'New owner',
+        },
+        projectWikilink: {
+          type: 'string',
+          description: 'New project',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Replace tags array',
+        },
+        blockedBy: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Replace blockedBy array',
+        },
+      },
+      required: ['taskKey'],
+    },
+  },
+  // --- Dynamic query tool ---
+  {
+    name: 'koi_query',
+    description:
+      'Execute a read-only SQL query against the knowledge graph database. Use this for queries that don\'t fit existing tools — cross-table joins, aggregations, custom filters. Always use parameterized queries ($1, $2) for values. Tables: entity_registry, entity_relationships, task_registry, claims, claim_attestations, koi_memories, koi_memory_chunks, commitments, commitment_pools, email_metadata.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sql: {
+          type: 'string',
+          description: 'SELECT or WITH query using $1,$2 param placeholders for all values',
+        },
+        params: {
+          type: 'array',
+          items: {},
+          description: 'Parameter values matching $1,$2 placeholders in order',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max rows to return (default 200, max 1000)',
+        },
+      },
+      required: ['sql'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -1664,6 +1847,71 @@ Rules:
         };
       }
 
+      // --- 4 Task management handlers ---
+      case 'task_dashboard': {
+        const [statsRes, inboxRes] = await Promise.all([
+          client.get('/tasks/stats'),
+          client.get('/tasks', { params: { status: 'inbox', limit: 5 } }),
+        ]);
+        const result = {
+          stats: statsRes.data,
+          inbox_preview: inboxRes.data.tasks || inboxRes.data,
+        };
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case 'task_list': {
+        const params: Record<string, string | number> = {};
+        if (args.status) params.status = args.status as string;
+        if (args.owner) params.owner = args.owner as string;
+        if (args.project) params.project = args.project as string;
+        if (args.due_before) params.due_before = args.due_before as string;
+        if (args.due_after) params.due_after = args.due_after as string;
+        if (args.source_type) params.source_type = args.source_type as string;
+        if (args.limit) params.limit = args.limit as number;
+        const { data } = await client.get('/tasks', { params });
+        // Client-side priority filter (backend doesn't support priority param)
+        let tasks = Array.isArray(data) ? data : (data.tasks || data);
+        if (args.priority && Array.isArray(tasks)) {
+          const priorities = new Set((args.priority as string).toLowerCase().split(',').map(s => s.trim()));
+          tasks = tasks.filter((t: any) => t.priority && priorities.has(t.priority.toLowerCase()));
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(tasks, null, 2) }] };
+      }
+
+      case 'task_add': {
+        const body: Record<string, unknown> = {
+          title: args.title,
+          taskKey: args.taskKey,
+          sourceType: (args.sourceType as string) || 'personal',
+        };
+        if (args.status) body.status = args.status;
+        if (args.priority) body.priority = args.priority;
+        if (args.dueDate) body.dueDate = args.dueDate;
+        if (args.ownerWikilink) body.ownerWikilink = args.ownerWikilink;
+        if (args.projectWikilink) body.projectWikilink = args.projectWikilink;
+        if (args.context) body.context = args.context;
+        if (args.effort) body.effort = args.effort;
+        if (args.tags) body.tags = args.tags;
+        if (args.blockedBy) body.blockedBy = args.blockedBy;
+        const { data } = await client.post('/tasks/ingest', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'task_update': {
+        const taskKey = args.taskKey as string;
+        const patch: Record<string, unknown> = {};
+        if (args.status !== undefined) patch.status = args.status;
+        if (args.priority !== undefined) patch.priority = args.priority;
+        if (args.dueDate !== undefined) patch.dueDate = args.dueDate;
+        if (args.ownerWikilink !== undefined) patch.ownerWikilink = args.ownerWikilink;
+        if (args.projectWikilink !== undefined) patch.projectWikilink = args.projectWikilink;
+        if (args.tags !== undefined) patch.tags = args.tags;
+        if (args.blockedBy !== undefined) patch.blockedBy = args.blockedBy;
+        const { data } = await client.patch(`/tasks/${encodeURIComponent(taskKey)}`, patch);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
       case 'suggest_pool_routes': {
         const draft = args.draft as Record<string, unknown> | undefined;
         const commitmentRid = args.commitment_rid as string | undefined;
@@ -1695,6 +1943,23 @@ Rules:
         }
 
         const { data } = await client.post('/commitments/routing-suggestions', routingPayload);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      // --- Dynamic query tool ---
+      case 'koi_query': {
+        const sql = (args.sql as string).trim();
+        if (!/^(SELECT|WITH)\s/i.test(sql)) {
+          return {
+            content: [{ type: 'text', text: 'Only SELECT or WITH queries allowed' }],
+            isError: true,
+          };
+        }
+        const { data } = await client.post('/sql', {
+          sql,
+          params: (args.params as any[]) || [],
+          limit: (args.limit as number) || 200,
+        });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

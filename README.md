@@ -145,6 +145,23 @@ vault_ingest_extraction({
 // Result: Resolves to "Shawn Anderson" @ 93.4% confidence
 ```
 
+### Task Management
+
+| Tool | Description |
+|------|-------------|
+| `task_dashboard` | Summary stats + inbox preview |
+| `task_list` | List tasks with filters (status, priority, owner, due date) |
+| `task_add` | Create/upsert a task (idempotent by taskKey) |
+| `task_update` | Patch specific fields on an existing task |
+
+### Dynamic Query
+
+| Tool | Description |
+|------|-------------|
+| `koi_query` | Execute read-only SQL against the knowledge graph (10-table whitelist, parameterized queries only) |
+
+The `koi_query` tool enables arbitrary SELECT queries with `$1,$2` parameterized values. Defense-in-depth: client-side SELECT/WITH pre-validation, server-side table whitelist, read-only transaction, 5s timeout, parameterization enforcement. Requires `QUERY_ENDPOINT_ENABLED=true` on the backend (`POST /sql` endpoint).
+
 ### Claims Engine
 
 | Tool | Description |
