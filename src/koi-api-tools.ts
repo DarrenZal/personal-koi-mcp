@@ -1407,6 +1407,23 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       required: ['sql'],
     },
   },
+  // --- Project briefing tool ---
+  {
+    name: 'project_briefing',
+    description:
+      'Get a project briefing with spec hierarchy, active tasks, and recent sessions. Works with any registered project in the Forest Garden spec governance system.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description:
+            "Project name, ID, or URI (e.g., 'bkc', 'fg', 'forest-garden', 'dw', 'ssd', 'project:forest-garden')",
+        },
+      },
+      required: ['project'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -1959,6 +1976,14 @@ Rules:
           sql,
           params: (args.params as any[]) || [],
           limit: (args.limit as number) || 200,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'project_briefing': {
+        const project = args.project as string;
+        const { data } = await client.get('/project/briefing', {
+          params: { project },
         });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
