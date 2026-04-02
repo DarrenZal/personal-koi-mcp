@@ -1505,6 +1505,29 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
     },
   },
   {
+    name: 'unified_search',
+    description:
+      'Search across all KOI knowledge surfaces (entities, facts, sessions) with a single query. Returns RRF-fused results ranked by relevance across all surfaces. Use when asked "what do we know about X?" or for comprehensive cross-surface search.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (e.g., "Kevin Owocki", "KOI federation")',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results to return (default 10)',
+        },
+        include: {
+          type: 'string',
+          description: 'Comma-separated surfaces: entities,facts,sessions (default: all)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'search_episodes',
     description:
       'Search or list knowledge episodes (grouping units for facts). Filter by source document path or text query. Use when asked "what was discussed in meeting X?" or listing knowledge sources.',
@@ -2106,6 +2129,14 @@ Rules:
         if (args.group_id) body.group_id = args.group_id;
         if (args.create_entities !== undefined) body.create_entities = args.create_entities;
         const { data } = await client.post('/knowledge/episodes', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'unified_search': {
+        const params: Record<string, string> = { query: args.query as string };
+        if (args.limit) params.limit = String(args.limit);
+        if (args.include) params.include = args.include as string;
+        const { data } = await client.get('/knowledge/unified-search', { params });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
