@@ -18,6 +18,8 @@ Personal knowledge management through Model Context Protocol (MCP). Search your 
 - BGE embedding server on port 8091
 - PostgreSQL database `personal_koi`
 
+This local stack does not share Octo's database. It uses its own KOI backend deployment and `personal_koi` DB, even though that backend comes from the same `koi-processor` codebase family used by the bioregional nodes.
+
 ```bash
 # Start the backend
 ~/.config/personal-koi/start.sh
@@ -186,6 +188,8 @@ This local setup is a 3-repository stack:
 - `koi-sensors` for data ingestion (`email`, `claude_sessions`, vault/sensor pipelines)
 - `koi-processor` for storage and query endpoints on `http://localhost:8351`
 - `personal-koi-mcp` for MCP tools consumed by Claude Code
+
+The backend here is a separate deployment of the same KOI backend codebase used by the bioregional nodes. What is shared is the code and API contract, not the live database or runtime instance.
 
 Runbook: [`docs/LOCAL_STACK_RUNBOOK.md`](docs/LOCAL_STACK_RUNBOOK.md)
 

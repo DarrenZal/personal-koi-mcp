@@ -1424,6 +1424,112 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       required: ['project'],
     },
   },
+  // --- Knowledge graph tools (episodes + temporal facts) ---
+  {
+    name: 'add_knowledge',
+    description:
+      'Store knowledge facts extracted from text into the KOI knowledge graph. Creates an episode (grouping unit) with associated facts. Each fact is a natural-language sentence linking a subject entity to an object entity or literal value via a predicate. Entities are resolved against the existing registry or created if missing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Episode title (e.g., "2026-04-01 Regen Network Meeting")',
+        },
+        content: {
+          type: 'string',
+          description: 'Full text or summary of the source material',
+        },
+        source_description: {
+          type: 'string',
+          description: 'Brief source type (e.g., "meeting notes", "session summary")',
+        },
+        source_document: {
+          type: 'string',
+          description: 'Vault path or URL of source (e.g., "Meetings/2026-04-01 Call.md")',
+        },
+        facts: {
+          type: 'array',
+          description: 'Array of fact objects to store',
+          items: {
+            type: 'object',
+            properties: {
+              subject: { type: 'string', description: 'Entity name for the subject' },
+              predicate: { type: 'string', description: 'Relationship type in UPPER_CASE (e.g., USES, DEVELOPS, MEMBER_OF)' },
+              object: { type: 'string', description: 'Entity name for the object (if entity reference)' },
+              object_literal: { type: 'string', description: 'Free text value (if not an entity)' },
+              fact_text: { type: 'string', description: 'Natural language sentence describing this fact' },
+              valid_from: { type: 'string', description: 'ISO date when fact became true' },
+              valid_to: { type: 'string', description: 'ISO date when fact stopped being true (null = still valid)' },
+            },
+            required: ['subject', 'predicate', 'fact_text'],
+          },
+        },
+        group_id: {
+          type: 'string',
+          description: 'Knowledge domain (default: "personal")',
+        },
+        create_entities: {
+          type: 'boolean',
+          description: 'Create missing entities in entity_registry (default: true)',
+        },
+      },
+      required: ['name', 'facts'],
+    },
+  },
+  {
+    name: 'search_facts',
+    description:
+      'Semantic search over knowledge facts stored in the KOI graph. Returns facts ranked by cosine similarity to the query, with their source episodes and linked entities. Use when asked "what do we know about X?" or searching for specific knowledge.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (e.g., "knowledge graph system", "who works on carbon credits")',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results to return (default 10)',
+        },
+        group_id: {
+          type: 'string',
+          description: 'Filter by knowledge domain',
+        },
+        include_expired: {
+          type: 'boolean',
+          description: 'Include facts with valid_to set (default: false)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'search_episodes',
+    description:
+      'Search or list knowledge episodes (grouping units for facts). Filter by source document path or text query. Use when asked "what was discussed in meeting X?" or listing knowledge sources.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Text search in episode name/content',
+        },
+        source_document: {
+          type: 'string',
+          description: 'Filter by source document path (partial match)',
+        },
+        group_id: {
+          type: 'string',
+          description: 'Filter by knowledge domain',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results (default 20)',
+        },
+      },
+    },
+  },
 ];
 
 // =============================================================================
@@ -1985,6 +2091,40 @@ Rules:
         const { data } = await client.get('/project/briefing', {
           params: { project },
         });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      // --- Knowledge graph tools ---
+      case 'add_knowledge': {
+        const body: Record<string, unknown> = {
+          name: args.name,
+          facts: args.facts,
+        };
+        if (args.content) body.content = args.content;
+        if (args.source_description) body.source_description = args.source_description;
+        if (args.source_document) body.source_document = args.source_document;
+        if (args.group_id) body.group_id = args.group_id;
+        if (args.create_entities !== undefined) body.create_entities = args.create_entities;
+        const { data } = await client.post('/knowledge/episodes', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'search_facts': {
+        const params: Record<string, string> = { query: args.query as string };
+        if (args.limit) params.limit = String(args.limit);
+        if (args.group_id) params.group_id = args.group_id as string;
+        if (args.include_expired) params.include_expired = 'true';
+        const { data } = await client.get('/knowledge/facts/search', { params });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'search_episodes': {
+        const params: Record<string, string> = {};
+        if (args.query) params.query = args.query as string;
+        if (args.source_document) params.source_document = args.source_document as string;
+        if (args.group_id) params.group_id = args.group_id as string;
+        if (args.limit) params.limit = String(args.limit);
+        const { data } = await client.get('/knowledge/episodes', { params });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
