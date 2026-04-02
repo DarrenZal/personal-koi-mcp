@@ -4769,6 +4769,11 @@ Your feedback helps improve KOI for everyone.${
         // Try vault-only fallback on error
         logger.error(`Backend error, falling back to vault: ${errorMessage}`);
 
+        // Mark backend unavailable so the recursive call takes the vault-only path
+        // instead of retrying the failed backend call
+        const backendClient = getBackendClient();
+        backendClient.markUnavailable();
+
         return this.vaultIngestExtraction({
           ...args,
           fallbackToVault: false // Prevent infinite recursion

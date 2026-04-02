@@ -6,6 +6,7 @@
  */
 
 import axios from 'axios';
+import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { typeToFolderSync, EntityTypeConfig, getEntityTypes } from './entity-schema.js';
@@ -229,6 +230,22 @@ export class BackendClient {
         'Content-Type': 'application/json',
       },
     });
+
+    // Disable keep-alive to prevent ECONNRESET from stale connection reuse.
+    // Node.js 19+ enables keep-alive by default, but uvicorn's 5s keep-alive
+    // timeout closes idle connections — causing ECONNRESET when axios tries to
+    // reuse a closed socket.
+    this.client.defaults.httpAgent = new http.Agent({ keepAlive: false });
+  }
+
+  /**
+   * Mark the backend as unavailable (e.g., after a connection error).
+   * Forces the next isAvailable() call to re-check, and causes callers
+   * to take the fallback path immediately.
+   */
+  markUnavailable(): void {
+    this._isAvailable = false;
+    this._lastHealthCheck = Date.now();
   }
 
   /**
@@ -518,17 +535,24 @@ export class BackendClient {
       return response.data;
     } catch (e) {
       const error = e as any;
+      const emptyResult = {
+        candidates: [],
+        related_documents: [],
+        context_types: [],
+        candidate_count: 0,
+        related_document_count: 0,
+      };
 
       // Check if endpoint doesn't exist yet (404)
       if (error.response?.status === 404) {
-        // Return empty result
-        return {
-          candidates: [],
-          related_documents: [],
-          context_types: [],
-          candidate_count: 0,
-          related_document_count: 0,
-        };
+        return emptyResult;
+      }
+
+      // Gracefully degrade on connection errors (ECONNRESET, ECONNREFUSED, etc.)
+      // Contextual candidates are optional — they improve name resolution but
+      // the ingestion pipeline works without them.
+      if (error.code === 'ECONNRESET' || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+        return emptyResult;
       }
 
       throw new Error(`Failed to get contextual candidates: ${error.message}`);
