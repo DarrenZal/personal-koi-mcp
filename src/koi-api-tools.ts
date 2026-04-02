@@ -1550,6 +1550,10 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
           type: 'number',
           description: 'Max results (default 20)',
         },
+        created_after: {
+          type: 'string',
+          description: 'ISO datetime — only return episodes created after this timestamp (e.g. 2026-04-01T00:00:00)',
+        },
       },
     },
   },
@@ -2155,6 +2159,7 @@ Rules:
         if (args.source_document) params.source_document = args.source_document as string;
         if (args.group_id) params.group_id = args.group_id as string;
         if (args.limit) params.limit = String(args.limit);
+        if (args.created_after) params.created_after = args.created_after as string;
         const { data } = await client.get('/knowledge/episodes', { params });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
