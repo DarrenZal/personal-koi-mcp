@@ -13,6 +13,7 @@ import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import YAML from 'yaml';
 
 // =============================================================================
@@ -1557,6 +1558,26 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       },
     },
   },
+  {
+    name: 'vault_concept_search',
+    description: `Search your Obsidian vault by concept or topic — returns ranked notes with matched sections.
+
+Use this when vault_search_notes returns too many or irrelevant results, or when searching by topic/concept rather than exact name.
+
+Examples:
+- vault_concept_search(query="commitment pooling mechanisms")
+- vault_concept_search(query="herring habitat restoration", limit=5)
+- vault_concept_search(query="KOI knowledge graph", folder="Code")`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Concept or topic to search for' },
+        limit: { type: 'number', description: 'Max results (default 10)' },
+        folder: { type: 'string', description: 'Restrict to a specific top-level vault folder (e.g., "Concepts", "Meetings")' },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -2162,6 +2183,43 @@ Rules:
         if (args.created_after) params.created_after = args.created_after as string;
         const { data } = await client.get('/knowledge/episodes', { params });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'vault_concept_search': {
+        const { query, limit = 10, folder } = args as { query: string; limit?: number; folder?: string };
+        const venvPython = path.join(process.env.HOME!, '.claude/local/darren-workflow/pageindex/venv/bin/python3');
+        const scriptPath = path.join(process.env.HOME!, 'projects/darren-workflow/scripts/pageindex.py');
+
+        const scriptArgs = ['query', String(query), '--limit', String(limit), '--json'];
+        if (folder) scriptArgs.push('--folder', String(folder));
+
+        return new Promise((resolve) => {
+          let settled = false;
+          const done = (result: any) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+
+          const proc = spawn(venvPython, [scriptPath, ...scriptArgs], { env: { ...process.env } });
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+          proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+          proc.on('error', (err: Error) => {
+            done({ content: [{ type: 'text', text: `vault_concept_search spawn error: ${err.message}` }], isError: true });
+          });
+          proc.on('close', (code: number | null) => {
+            if (code !== 0) {
+              done({ content: [{ type: 'text', text: `vault_concept_search error (exit ${code}): ${stderr}` }], isError: true });
+              return;
+            }
+            try {
+              const parsed = JSON.parse(stdout);
+              const n = parsed.results?.length ?? 0;
+              done({ content: [{ type: 'text', text: `Found ${n} results for '${query}':\n\n${JSON.stringify(parsed, null, 2)}` }] });
+            } catch {
+              done({ content: [{ type: 'text', text: `vault_concept_search parse error: ${stdout}` }], isError: true });
+            }
+          });
+          const timer = setTimeout(() => { proc.kill(); done({ content: [{ type: 'text', text: 'vault_concept_search timed out after 15s' }], isError: true }); }, 15000);
+        });
       }
 
       default:
