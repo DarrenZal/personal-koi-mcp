@@ -1508,7 +1508,7 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'unified_search',
     description:
-      'Search across all KOI knowledge surfaces (entities, facts, sessions) with a single query. Returns RRF-fused results ranked by relevance across all surfaces. Use when asked "what do we know about X?" or for comprehensive cross-surface search.',
+      'Search across all KOI knowledge surfaces (entities, facts, sessions, docs) with a single query. Returns RRF-fused results ranked by relevance across all surfaces. Use when asked "what do we know about X?" or for comprehensive cross-surface search. Add include="docs" to search governed repo docs.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1522,7 +1522,23 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
         },
         include: {
           type: 'string',
-          description: 'Comma-separated surfaces: entities,facts,sessions (default: all)',
+          description: 'Comma-separated surfaces: entities,facts,sessions,docs (default: entities,facts,sessions)',
+        },
+        doc_kind: {
+          type: 'string',
+          description: 'Filter docs surface by kind: architecture, spec, operations, etc.',
+        },
+        status: {
+          type: 'string',
+          description: 'Filter docs surface by status: active, draft, deprecated, etc.',
+        },
+        is_governed: {
+          type: 'boolean',
+          description: 'Filter docs surface to only governed docs (those with a doc_id)',
+        },
+        repo: {
+          type: 'string',
+          description: 'Filter docs surface by repo name (e.g. darren-workflow)',
         },
       },
       required: ['query'],
@@ -2161,6 +2177,10 @@ Rules:
         const params: Record<string, string> = { query: args.query as string };
         if (args.limit) params.limit = String(args.limit);
         if (args.include) params.include = args.include as string;
+        if (args.doc_kind) params.doc_kind = args.doc_kind as string;
+        if (args.status) params.status = args.status as string;
+        if (args.is_governed !== undefined) params.is_governed = String(args.is_governed);
+        if (args.repo) params.repo = args.repo as string;
         const { data } = await client.get('/knowledge/unified-search', { params });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
