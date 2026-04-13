@@ -588,10 +588,20 @@ export class BackendClient {
       const type = match[1];
       const slugName = match[2];
 
-      // Convert slug back to title case
+      // Convert slug → title case, but preserve stop-words lowercase
+      // (except when they're the first word). This matches Obsidian's
+      // default naming — e.g. "Club of Rome" not "Club Of Rome".
+      const STOP_WORDS = new Set([
+        'a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'in', 'nor',
+        'of', 'on', 'or', 'per', 'the', 'to', 'via', 'vs', 'with'
+      ]);
       const name = slugName
         .split('-')
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .map((w, i) =>
+          i > 0 && STOP_WORDS.has(w)
+            ? w
+            : w.charAt(0).toUpperCase() + w.slice(1)
+        )
         .join(' ');
 
       // Map type to folder (schema-driven, capitalize first letter for lookup)

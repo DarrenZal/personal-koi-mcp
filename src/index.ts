@@ -4764,20 +4764,39 @@ Your feedback helps improve KOI for everyone.${
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorStack = error instanceof Error ? error.stack : '';
+      const errorCode = (error as any)?.code;
+      const errorResponseStatus = (error as any)?.response?.status;
+      const errorResponseData = JSON.stringify((error as any)?.response?.data || {}).slice(0, 500);
+
+      // Log the real error so it surfaces in MCP stderr
+      logger.error({
+        err: error,
+        code: errorCode,
+        responseStatus: errorResponseStatus,
+        responseData: errorResponseData,
+      }, `Backend call failed in vaultIngestExtraction`);
 
       if (fallbackToVault) {
-        // Try vault-only fallback on error
-        logger.error(`Backend error, falling back to vault: ${errorMessage}`);
-
         // Mark backend unavailable so the recursive call takes the vault-only path
         // instead of retrying the failed backend call
         const backendClient = getBackendClient();
         backendClient.markUnavailable();
 
-        return this.vaultIngestExtraction({
-          ...args,
-          fallbackToVault: false // Prevent infinite recursion
-        });
+        // Return diagnostic error instead of falling back silently — the
+        // previous recursive-fallback-with-fallbackToVault=false path produced
+        // a misleading "backend unavailable" message that hid the real cause.
+        return {
+          content: [{
+            type: 'text',
+            text: `Error in vault_ingest_extraction:\n` +
+                  `  message: ${errorMessage}\n` +
+                  `  code: ${errorCode || 'n/a'}\n` +
+                  `  http_status: ${errorResponseStatus || 'n/a'}\n` +
+                  `  response_data: ${errorResponseData}\n` +
+                  `  stack (truncated): ${(errorStack || '').split('\n').slice(0, 6).join(' | ')}`
+          }]
+        };
       }
 
       return {
