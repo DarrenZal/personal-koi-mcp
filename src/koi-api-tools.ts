@@ -740,6 +740,29 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
     },
   },
   {
+    name: 'calendar_events_by_date',
+    description:
+      "Return calendar events (from email-ingested ICS invites) within a date range. Use for 'do I have meetings on Friday?' style queries. Events returned are those whose dtstart falls inside [from_iso, to_iso). V1 source is fixed to ics-event (Proton/Gmail email-derived). Returns structured events with dtstart/dtend (UTC ISO 8601), location, attendees, organizer.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from_iso: {
+          type: 'string',
+          description: "Start timestamp, inclusive (ISO 8601, e.g. '2026-04-17T00:00:00-07:00')",
+        },
+        to_iso: {
+          type: 'string',
+          description: 'End timestamp, exclusive (ISO 8601)',
+        },
+        include_cancelled: {
+          type: 'boolean',
+          description: 'Include cancelled events (default false)',
+        },
+      },
+      required: ['from_iso', 'to_iso'],
+    },
+  },
+  {
     name: 'preview_url',
     description:
       'Fetch and preview a URL for evaluation. Returns title, content summary, detected entities, and safety check. Does NOT ingest.',
@@ -1690,6 +1713,16 @@ export async function handleKoiApiTool(
         };
         if (args.source) body.source = args.source;
         const { data } = await client.post('/search', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'calendar_events_by_date': {
+        const params: Record<string, string> = {
+          from: args.from_iso as string,
+          to: args.to_iso as string,
+        };
+        if (args.include_cancelled) params.include_cancelled = 'true';
+        const { data } = await client.get('/calendar/events', { params });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
