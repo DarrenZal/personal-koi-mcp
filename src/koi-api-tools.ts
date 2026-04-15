@@ -1387,7 +1387,7 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'koi_query',
     description:
-      'Execute a read-only SQL query against the knowledge graph database. Use this for queries that don\'t fit existing tools — cross-table joins, aggregations, custom filters. Always use parameterized queries ($1, $2) for values. Tables: entity_registry, entity_relationships, task_registry, claims, claim_attestations, koi_memories, koi_memory_chunks, commitments, commitment_pools, email_metadata.',
+      'Execute a read-only SQL query against the knowledge graph database. Use this for queries that don\'t fit existing tools — cross-table joins, aggregations, custom filters. Always use parameterized queries ($1, $2) for values. Tables: entity_registry, entity_relationships, task_registry, claims, claim_attestations, koi_memories, koi_memory_chunks, commitments, commitment_pools, email_metadata, mediawiki_wikis, mediawiki_page_state, mediawiki_page_links, mediawiki_import_runs.',
     inputSchema: {
       type: 'object',
       properties: {
