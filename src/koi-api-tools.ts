@@ -2282,7 +2282,16 @@ Rules:
         };
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
+    let msg = error instanceof Error ? error.message : 'Unknown error';
+    // Surface FastAPI error detail (e.g. SQL guard messages from /sql) instead
+    // of the generic "Request failed with status code 400".
+    const response = (error as any)?.response;
+    if (response && response.data !== undefined) {
+      const data = response.data;
+      const detail = (data && typeof data === 'object' && 'detail' in data) ? data.detail : data;
+      const detailStr = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      if (detailStr) msg = `${msg} — ${detailStr}`;
+    }
     return {
       content: [{ type: 'text', text: `KOI API error (${toolName}): ${msg}` }],
       isError: true,
