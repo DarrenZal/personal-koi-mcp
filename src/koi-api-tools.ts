@@ -317,6 +317,15 @@ async function resolveLocalNoteTarget(
     candidateSet.add(`${relativeBase}.md`);
   }
 
+  // Obsidian treats wikilinks containing folders (e.g. [[Folder/Note]]) as
+  // vault-root-relative, not source-relative. Add that interpretation so
+  // `[[Research/sheaf-theory-sources/foo]]` cited from `Research/bar.md`
+  // resolves to `Research/sheaf-theory-sources/foo.md` rather than the
+  // nonexistent `Research/Research/sheaf-theory-sources/foo.md`.
+  if (!sanitized.startsWith('/') && sanitized.includes('/')) {
+    candidateSet.add(hasExt ? sanitized : `${sanitized}.md`);
+  }
+
   // Obsidian-style fallback: [[Note Title]] can resolve by filename anywhere in the vault.
   if (!sanitized.includes('/') && !hasExt) {
     const key = `${sanitized.toLowerCase()}.md`;
