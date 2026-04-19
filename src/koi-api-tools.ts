@@ -11,6 +11,7 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -50,6 +51,35 @@ async function getKoiAdminAuthHeaders(): Promise<Record<string, string> | undefi
     }
   }
   if (!token) return undefined;
+  return { Authorization: `Bearer ${token}` };
+}
+
+function getKoiStateDir(): string {
+  const home = process.env.HOME || '';
+  const defaultStateDir = home ? path.join(home, '.config', 'personal-koi', 'koi-state') : '';
+  return process.env.KOI_STATE_DIR || defaultStateDir;
+}
+
+async function getOrCreateMcpWorkstationId(): Promise<string> {
+  const fromEnv = process.env.MCP_WORKSTATION_ID?.trim();
+  if (fromEnv) return fromEnv;
+  const stateDir = getKoiStateDir();
+  const filePath = path.join(stateDir, 'workstation_id');
+  try {
+    const existing = (await fs.readFile(filePath, 'utf-8')).trim();
+    if (existing) return existing;
+  } catch {
+    // Generate below.
+  }
+  const generated = randomUUID();
+  await fs.mkdir(stateDir, { recursive: true });
+  await fs.writeFile(filePath, generated, { encoding: 'utf-8', mode: 0o600 });
+  return generated;
+}
+
+async function getMcpCrawlHeaders(): Promise<Record<string, string>> {
+  const token = process.env.CRAWL_TOKEN_MCP?.trim();
+  if (!token) throw new Error('CRAWL_TOKEN_MCP is not configured');
   return { Authorization: `Bearer ${token}` };
 }
 
@@ -835,6 +865,22 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
             },
             required: ['subject', 'predicate', 'object'],
           },
+        },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'crawl_site',
+    description:
+      'Run the agentic web crawl flow end-to-end against a site, wait for the proposal, and commit it with any extra relate clauses from the instruction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Root URL to crawl' },
+        instruction: {
+          type: 'string',
+          description: 'Optional guidance like "map this org and relate to Victoria Landscape Hub"',
         },
       },
       required: ['url'],
@@ -1759,6 +1805,99 @@ export async function handleKoiApiTool(
           relationships: (args.relationships as any[]) || [],
         });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'crawl_site': {
+        const crawlHeaders = await getMcpCrawlHeaders();
+        const workstationId = await getOrCreateMcpWorkstationId();
+        const submittedBy = `mcp:${workstationId}`;
+        const diagnostics = await client.get('/diagnostics/config');
+        if (diagnostics.data?.agentic_crawl_available !== true) {
+          return {
+            content: [{ type: 'text', text: 'Agentic crawl is disabled or unavailable on the KOI API.' }],
+            isError: true,
+          };
+        }
+
+        const instruction = (args.instruction as string | undefined)?.trim();
+        const parseTargets = instruction
+          ? (await client.post(
+              '/tools/parse-relate-clause',
+              { instruction },
+              { headers: crawlHeaders },
+            )).data?.targets || []
+          : [];
+        const extraRelationships = Array.isArray(parseTargets)
+          ? parseTargets.map((target: any) => ({
+              from: 0,
+              predicate: target.predicate_hint || 'related_to',
+              to: target.label,
+            }))
+          : [];
+
+        const enqueue = await client.post(
+          '/web/crawl-agentic',
+          { url: args.url, goal: instruction || undefined },
+          { headers: crawlHeaders },
+        );
+        const jobId = Number(enqueue.data?.job_id);
+        const progressLines: string[] = [`Started crawl job ${jobId} as ${submittedBy}`];
+        let finalJob: any = null;
+
+        for (;;) {
+          const { data } = await client.get(`/web/crawl-jobs/${jobId}`, { headers: crawlHeaders });
+          finalJob = data;
+          const progress = data?.progress || {};
+          progressLines.push(
+            `status=${data.status} pages=${progress.pages_visited || 0} entities=${progress.entities_so_far || 0} cost=$${Number(data.cost_usd || 0).toFixed(4)}`
+          );
+          if (['done', 'failed', 'cancelled', 'interrupted', 'committed', 'partially_committed'].includes(String(data.status))) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+
+        if (!finalJob || finalJob.status !== 'done') {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                job_id: jobId,
+                submitted_by: submittedBy,
+                status: finalJob?.status,
+                error: finalJob?.error || null,
+                progress_log: progressLines,
+              }, null, 2),
+            }],
+            isError: finalJob?.status !== 'committed',
+          };
+        }
+
+        const commit = await client.post(
+          `/web/crawl-jobs/${jobId}/commit`,
+          {
+            proposal_overrides: {
+              dropped_entity_indices: [],
+              entity_edits: {},
+              dropped_relationship_indices: [],
+            },
+            extra_relationships: extraRelationships,
+          },
+          { headers: crawlHeaders },
+        );
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              job_id: jobId,
+              submitted_by: submittedBy,
+              progress_log: progressLines,
+              proposal_stats: finalJob.result?.stats || null,
+              commit: commit.data,
+            }, null, 2),
+          }],
+        };
       }
 
       case 'github_scan': {
