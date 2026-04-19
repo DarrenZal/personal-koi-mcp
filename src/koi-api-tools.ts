@@ -1540,7 +1540,7 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'unified_search',
     description:
-      'Search across all KOI knowledge surfaces (entities, facts, sessions, docs) with a single query. Returns RRF-fused results ranked by relevance across all surfaces. Use when asked "what do we know about X?" or for comprehensive cross-surface search. Add include="docs" to search governed repo docs.',
+      'Search across all KOI knowledge surfaces (entities, facts, sessions, vault, docs) with a single query. Returns RRF-fused results ranked by relevance. The vault surface searches Obsidian markdown notes via BM25 — use this for questions about local orgs, people, projects, and bioregional topics. Use when asked "what do we know about X?" or for comprehensive cross-surface search.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1554,7 +1554,7 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
         },
         include: {
           type: 'string',
-          description: 'Comma-separated surfaces: entities,facts,sessions,docs (default: entities,facts,sessions)',
+          description: 'Comma-separated surfaces: entities,facts,sessions,vault,docs,wiki (default: all except docs)',
         },
         doc_kind: {
           type: 'string',
