@@ -1344,6 +1344,14 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
           type: 'string',
           description: 'ISO date YYYY-MM-DD — tasks due after this date',
         },
+        updated_before: {
+          type: 'string',
+          description: 'ISO date YYYY-MM-DD — tasks last updated before this date (use for stale-no-activity queries)',
+        },
+        updated_after: {
+          type: 'string',
+          description: 'ISO date YYYY-MM-DD — tasks last updated on or after this date',
+        },
         source_type: {
           type: 'string',
           description: 'Filter by source type: "meeting", "personal"',
@@ -2235,6 +2243,8 @@ Rules:
         if (args.project) params.project = args.project as string;
         if (args.due_before) params.due_before = args.due_before as string;
         if (args.due_after) params.due_after = args.due_after as string;
+        if (args.updated_before) params.updated_before = args.updated_before as string;
+        if (args.updated_after) params.updated_after = args.updated_after as string;
         if (args.source_type) params.source_type = args.source_type as string;
         if (args.limit) params.limit = args.limit as number;
         const { data } = await client.get('/tasks', { params });
