@@ -1562,7 +1562,7 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
         },
         include: {
           type: 'string',
-          description: 'Comma-separated surfaces: entities,facts,sessions,vault,docs,wiki (default: all except docs)',
+          description: 'Comma-separated surfaces: entities,facts,sessions,vault,docs,wiki (default: all except docs). NOTE: when including the docs surface, you must also pass `repo` (e.g. `repo: "spore"`) — without `repo` the docs surface returns no results.',
         },
         doc_kind: {
           type: 'string',
