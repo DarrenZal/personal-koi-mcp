@@ -1,7 +1,7 @@
 {
   "name": "personal-koi-mcp",
-  "version": "1.0.0",
-  "description": "Personal KOI MCP server with local Obsidian vault integration",
+  "version": "1.1.0",
+  "description": "Personal KOI MCP server with local Obsidian vault integration. Tier-2 1.1.0: routing-aware `recall` MCP tool (Strand A4 hybrid heuristic + operator-override hint over KOI hybrid retrieval + Graphiti temporal sidecar).",
   "main": "dist/index.js",
   "type": "module",
   "bin": {

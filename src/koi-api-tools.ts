@@ -16,6 +16,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import YAML from 'yaml';
+import { RECALL_TOOL_DEFINITION, handleRecallTool } from './tools/recall.js';
 
 // =============================================================================
 // Client setup
@@ -1591,10 +1592,11 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
       required: ['query'],
     },
   },
+  RECALL_TOOL_DEFINITION as unknown as Tool,
   {
     name: 'unified_search',
     description:
-      'Search across all KOI knowledge surfaces (entities, facts, sessions, vault, docs) with a single query. Returns RRF-fused results ranked by relevance. The vault surface searches Obsidian markdown notes via BM25 — use this for questions about local orgs, people, projects, and bioregional topics. Use when asked "what do we know about X?" or for comprehensive cross-surface search.',
+      'DEPRECATED — prefer `recall(query)` for routing-aware retrieval (auto-routes temporal/relationship queries to Graphiti sidecar). `unified_search` remains for semantic-only queries during the 4-week deprecation window (target removal: 2026-05-26 second Tier-2 production review). Searches across all KOI knowledge surfaces (entities, facts, sessions, vault, docs) with RRF fusion. Vault surface searches Obsidian markdown notes via BM25 — use for questions about local orgs, people, projects, and bioregional topics.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2362,6 +2364,10 @@ Rules:
         if (args.create_entities !== undefined) body.create_entities = args.create_entities;
         const { data } = await client.post('/knowledge/episodes', body);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'recall': {
+        return await handleRecallTool(args);
       }
 
       case 'unified_search': {
