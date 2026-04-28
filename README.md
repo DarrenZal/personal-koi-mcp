@@ -60,14 +60,33 @@ Enable in `~/.claude/settings.local.json`:
 
 | Tool | Description |
 |------|-------------|
+| `recall` | **(preferred)** Routing-aware retrieval: KOI hybrid for semantic queries, Graphiti temporal sidecar for temporal/relationship queries. Per Tier-2 Strand A4. |
+| `unified_search` | **DEPRECATED** — prefer `recall(query)`. Remains functional during 4-week deprecation window (target removal: 2026-05-26 second Tier-2 production review). KOI semantic-only retrieval. |
 | `search` | Semantic search across emails, vault, sessions |
 | `get_stats` | Statistics about indexed content |
 
 **Examples:**
 ```
+recall(query="When did F2 transition from candidate to decline-with-triggers?")  # auto → temporal → Graphiti
+recall(query="canon-review v1 wiki intake retrospective")                          # auto → semantic → KOI
+recall(query="herring habitat", shape="semantic")                                  # operator-override
 search(query="hackathon", source="email")
-search(query="regen network carbon credits")
 ```
+
+#### Tier-2 `recall` MCP tool
+
+Routes by query shape:
+- `semantic`     → KOI hybrid retrieval (`/knowledge/unified-search`)
+- `temporal`     → Graphiti temporal sidecar (`koi_canon_v1` group)
+- `relationship` → Graphiti temporal sidecar (same backend)
+
+Failure semantics:
+- Graphiti unreachable → falls back to KOI hybrid; response carries `routing.shape_source = "fallback"`. Not an error to caller.
+- KOI unreachable → returns `error_code: "substrate_unavailable"`. Graphiti alone is insufficient.
+
+Revert mechanism: set env `RECALL_ROUTING_ENABLED=false` (in `~/.config/personal-koi/personal.env` or operator shell), reload MCP client. ALL queries route to KOI hybrid (Graphiti leg disabled); response carries `routing.shape_source = "fallback"`. Verified: 5/5 POC bench queries route via `legs_queried=["koi"]` under revert, `shape_source="fallback"`, `latency_ms.graphiti = null` (Step 7 hardening, 2026-04-29). Flip-flop is hot — env var is read per-call by the recall handler; no MCP-server-process restart required.
+
+Per-call observability: every invocation appends a JSON line to `~/.koi/logs/recall-metrics.jsonl`.
 
 ### Vault Operations
 
