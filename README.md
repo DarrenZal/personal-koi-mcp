@@ -60,31 +60,35 @@ Enable in `~/.claude/settings.local.json`:
 
 | Tool | Description |
 |------|-------------|
-| `recall` | **(preferred)** Routing-aware retrieval: KOI hybrid for semantic queries, Graphiti temporal sidecar for temporal/relationship queries. Per Tier-2 Strand A4. |
+| `recall` | **(preferred)** Routing-aware retrieval: KOI hybrid for semantic queries, KOI-native PostgreSQL recursive-CTE walk for temporal/relationship queries. Per Tier-2 Strand A4 (Tier-3 backend port 2026-04-29). |
 | `unified_search` | **DEPRECATED** — prefer `recall(query)`. Remains functional during 4-week deprecation window (target removal: 2026-05-26 second Tier-2 production review). KOI semantic-only retrieval. |
 | `search` | Semantic search across emails, vault, sessions |
 | `get_stats` | Statistics about indexed content |
 
 **Examples:**
 ```
-recall(query="When did F2 transition from candidate to decline-with-triggers?")  # auto → temporal → Graphiti
-recall(query="canon-review v1 wiki intake retrospective")                          # auto → semantic → KOI
+recall(query="When did F2 transition from candidate to decline-with-triggers?")  # auto → temporal → KOI walk
+recall(query="canon-review v1 wiki intake retrospective")                          # auto → semantic → KOI hybrid
 recall(query="herring habitat", shape="semantic")                                  # operator-override
 search(query="hackathon", source="email")
 ```
 
-#### Tier-2 `recall` MCP tool
+#### `recall` MCP tool (Tier-3 1.2.0 — 2026-04-29)
 
 Routes by query shape:
-- `semantic`     → KOI hybrid retrieval (`/knowledge/unified-search`)
-- `temporal`     → Graphiti temporal sidecar (`koi_canon_v1` group)
-- `relationship` → Graphiti temporal sidecar (same backend)
+- `semantic`     → KOI hybrid retrieval (`/knowledge/unified-search` over entities/facts/sessions/wiki/vault)
+- `temporal`     → KOI recursive-CTE walk (`/knowledge/recall-walk` over `knowledge_facts` with `valid_to IS NULL`)
+- `relationship` → KOI recursive-CTE walk (same backend; expired edges included with `expired: true`)
+
+**Tier-3 architectural correction (1.2.0)**: previously the temporal/relationship leg routed to a Graphiti FalkorDB sidecar; that sidecar is being retired (Phase 9 tear-out scheduled tomorrow after overnight bake-in). The replacement walks the existing PostgreSQL `knowledge_facts` table (bi-temporal `valid_from`/`valid_to`, embedded fact text, episode anchoring, idempotent dedup with cosine>0.95 supersession). Single-substrate now.
 
 Failure semantics:
-- Graphiti unreachable → falls back to KOI hybrid; response carries `routing.shape_source = "fallback"`. Not an error to caller.
-- KOI unreachable → returns `error_code: "substrate_unavailable"`. Graphiti alone is insufficient.
+- KOI unreachable → returns `error_code: "substrate_unavailable"` (both legs share the substrate).
+- KOI walk endpoint error → falls back to `/knowledge/unified-search`; response carries `routing.shape_source = "fallback"`. Not an error to caller.
 
-Revert mechanism: set env `RECALL_ROUTING_ENABLED=false` (in `~/.config/personal-koi/personal.env` or operator shell), reload MCP client. ALL queries route to KOI hybrid (Graphiti leg disabled); response carries `routing.shape_source = "fallback"`. Verified: 5/5 POC bench queries route via `legs_queried=["koi"]` under revert, `shape_source="fallback"`, `latency_ms.graphiti = null` (Step 7 hardening, 2026-04-29). Flip-flop is hot — env var is read per-call by the recall handler; no MCP-server-process restart required.
+**Revert mechanisms**:
+- `RECALL_BACKEND=graphiti` — explicit revert to FalkorDB sidecar (still alive through Phase 9 tomorrow). Flip-flop is hot — env var is read per-call by the recall handler; no MCP-server-process restart required.
+- `RECALL_ROUTING_ENABLED=false` — disables shape routing entirely; all queries forced to KOI hybrid (`legs_queried=["koi"]`, `shape_source="fallback"`).
 
 Per-call observability: every invocation appends a JSON line to `~/.koi/logs/recall-metrics.jsonl`.
 
