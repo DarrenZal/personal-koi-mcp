@@ -55,6 +55,18 @@ const GRAPHITI_SIDECAR_FALLBACK = path.join(
   os.homedir(),
   "projects/personal-koi-mcp/python/graphiti_recall.py",
 );
+// Phase 3: KOI-native recall sidecar (PostgreSQL recursive-CTE walk).
+// Selected via RECALL_BACKEND=koi env flag. Default in Phase 3 stays
+// 'graphiti' (per plan); Phase 6 flips the default to 'koi'.
+const KOI_RECALL_SIDECAR_PATH = path.join(
+  process.cwd(),
+  "python",
+  "koi_recall.py",
+);
+const KOI_RECALL_SIDECAR_FALLBACK = path.join(
+  os.homedir(),
+  "projects/personal-koi-mcp/python/koi_recall.py",
+);
 const METRICS_DIR = path.join(os.homedir(), ".koi", "logs");
 const METRICS_PATH = path.join(METRICS_DIR, "recall-metrics.jsonl");
 const GRAPHITI_TIMEOUT_MS = 30_000;
@@ -163,8 +175,19 @@ async function queryKoi(
 
 // --- Graphiti leg ---
 function resolveGraphitiSidecar(): string {
-  if (fs.existsSync(GRAPHITI_SIDECAR_PATH)) return GRAPHITI_SIDECAR_PATH;
-  return GRAPHITI_SIDECAR_FALLBACK;
+  // Phase 6 (2026-04-29): default flipped to 'koi' (PostgreSQL recursive-CTE
+  // walk). Revert mechanism preserved via RECALL_BACKEND=graphiti env flag —
+  // routes back to FalkorDB sidecar while it's still alive (tear-out is
+  // Phase 9 tomorrow after overnight bake-in). Both sidecars have identical
+  // I/O contracts so downstream parsing in queryGraphiti() is unchanged.
+  const backend = (process.env.RECALL_BACKEND ?? "koi").toLowerCase();
+  if (backend === "graphiti") {
+    if (fs.existsSync(GRAPHITI_SIDECAR_PATH)) return GRAPHITI_SIDECAR_PATH;
+    return GRAPHITI_SIDECAR_FALLBACK;
+  }
+  // Default + explicit 'koi' both route to koi_recall.py.
+  if (fs.existsSync(KOI_RECALL_SIDECAR_PATH)) return KOI_RECALL_SIDECAR_PATH;
+  return KOI_RECALL_SIDECAR_FALLBACK;
 }
 
 async function queryGraphiti(
@@ -179,6 +202,8 @@ async function queryGraphiti(
   const t0 = Date.now();
   return new Promise((resolve) => {
     const sidecarPath = resolveGraphitiSidecar();
+    // Phase 6: default backend is 'koi'; explicit 'graphiti' opts out.
+    const backend = (process.env.RECALL_BACKEND ?? "koi").toLowerCase();
     const args = [
       sidecarPath,
       "--query",
@@ -188,7 +213,15 @@ async function queryGraphiti(
       "--group-id",
       GRAPHITI_GROUP_ID,
     ];
-    const proc = spawn(GRAPHITI_PYTHON, args, {
+    // Phase 6: graphiti_recall.py needs the graphiti-poc venv (graphiti-core
+    // import); koi_recall.py needs only httpx (system python is fine, but
+    // graphiti-poc venv also works since httpx is installed there).
+    // KOI_RECALL_PYTHON env override available for unusual python locations.
+    const pythonBin =
+      backend === "graphiti"
+        ? GRAPHITI_PYTHON
+        : (process.env.KOI_RECALL_PYTHON || "/usr/bin/python3");
+    const proc = spawn(pythonBin, args, {
       env: { ...process.env },
     });
     let stdout = "";
