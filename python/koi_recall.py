@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""KOI-native recall sidecar (Phase 3 of plan koi-graph-consolidation-retire-graphiti).
+"""KOI-native recall walk sidecar.
 
-Drop-in replacement for `python/graphiti_recall.py`: same CLI shape, same
-stdout JSON contract for `src/tools/recall.ts`. Backend is the new
-`/knowledge/recall-walk` endpoint (PostgreSQL recursive-CTE walk over
-knowledge_facts) instead of the FalkorDB graphiti sidecar.
+Spawned by `src/tools/recall.ts` for the `walk` leg (temporal + relationship
+shape queries). Calls `/knowledge/recall-walk` (PostgreSQL recursive-CTE over
+`knowledge_facts` with bi-temporal validity filtering).
+
+History: introduced 2026-04-29 Phase 3 of the koi-graph-consolidation arc as
+a drop-in replacement for the prior `graphiti_recall.py` (FalkorDB sidecar);
+the FalkorDB sidecar was retired 2026-04-30 Wave 1 close-out, leaving this
+file as the sole recall walk sidecar.
 
 CLI:
   koi_recall.py --query "<query text>" [--limit 5] [--group-id koi_canon_v1]
                 [--shape semantic|temporal|relationship]
 
-Output (JSON to stdout, one object) matching graphiti_recall.py contract:
+Output (JSON to stdout, one object):
   {
     "ok": true,
     "session_ids": ["<uuid>", ...],
@@ -39,7 +43,7 @@ KOI_BASE_URL = os.environ.get("KOI_API_ENDPOINT", "http://localhost:8351")
 
 
 def run_query(query: str, group_id: str, limit: int, shape: str) -> dict[str, Any]:
-    """POST /knowledge/recall-walk and translate response to graphiti contract."""
+    """POST /knowledge/recall-walk and emit the recall-walk sidecar JSON contract."""
     t0 = time.monotonic()
 
     # Pre-flight: GET /health (substrate-availability check).
@@ -91,10 +95,9 @@ def run_query(query: str, group_id: str, limit: int, shape: str) -> dict[str, An
         }
     data = r.json()
 
-    # Translate /recall-walk shape → graphiti_recall.py-compatible shape so
-    # src/tools/recall.ts (which currently spawns graphiti_recall.py) consumes
-    # this output identically. session_ids preserved at top-level; results
-    # mapped to "edges" with name/fact/valid_at/score.
+    # Translate /recall-walk shape → recall sidecar JSON contract for
+    # src/tools/recall.ts. session_ids preserved at top-level; results mapped
+    # to "edges" with name/fact/valid_at/score.
     edges_out: list[dict] = []
     for item in data.get("results", []):
         meta = item.get("metadata") or {}

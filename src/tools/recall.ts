@@ -38,38 +38,25 @@ import {
 // --- Config ---
 const KOI_BASE_URL =
   process.env.KOI_API_ENDPOINT || "http://127.0.0.1:8351";
-const GRAPHITI_GROUP_ID =
-  process.env.GRAPHITI_GROUP_ID || "koi_canon_v1";
-const GRAPHITI_PYTHON =
-  process.env.GRAPHITI_PYTHON ||
-  path.join(os.homedir(), ".venv/graphiti-poc/bin/python3");
-const GRAPHITI_SIDECAR_PATH = path.join(
-  process.cwd(),
-  "python",
-  "graphiti_recall.py",
-);
-// Fallback: resolve relative to this module if cwd-rooted path doesn't exist.
-const GRAPHITI_SIDECAR_FALLBACK = path.join(
-  // src/tools/recall.ts → ../../python/graphiti_recall.py at runtime, but with
-  // tsx/ESM resolution we can't use __dirname; use a candidate list.
-  os.homedir(),
-  "projects/personal-koi-mcp/python/graphiti_recall.py",
-);
-// Phase 3: KOI-native recall sidecar (PostgreSQL recursive-CTE walk).
-// Selected via RECALL_BACKEND=koi env flag. Default in Phase 3 stays
-// 'graphiti' (per plan); Phase 6 flips the default to 'koi'.
-const KOI_RECALL_SIDECAR_PATH = path.join(
+const KOI_CANON_GROUP_ID =
+  process.env.KOI_CANON_GROUP_ID || "koi_canon_v1";
+// KOI-native recall walk sidecar (PostgreSQL recursive-CTE over
+// knowledge_facts via /knowledge/recall-walk endpoint). Replaced the
+// Graphiti FalkorDB sidecar at Tier-3 architectural correction
+// (2026-04-29 Phases 1-7); FalkorDB LaunchAgent + container retired
+// 2026-04-30 Wave 1 close-out.
+const RECALL_WALK_SIDECAR_PATH = path.join(
   process.cwd(),
   "python",
   "koi_recall.py",
 );
-const KOI_RECALL_SIDECAR_FALLBACK = path.join(
+const RECALL_WALK_SIDECAR_FALLBACK = path.join(
   os.homedir(),
   "projects/personal-koi-mcp/python/koi_recall.py",
 );
 const METRICS_DIR = path.join(os.homedir(), ".koi", "logs");
 const METRICS_PATH = path.join(METRICS_DIR, "recall-metrics.jsonl");
-const GRAPHITI_TIMEOUT_MS = 30_000;
+const RECALL_WALK_TIMEOUT_MS = 30_000;
 
 // --- Types per plan §Strand C "MCP contract" ---
 export interface RecallInput {
@@ -82,7 +69,7 @@ export interface RecallInput {
 export interface RecallResultItem {
   id: string;
   score: number;
-  leg: "koi" | "graphiti";
+  leg: "hybrid" | "walk";
   content: string;
   metadata: Record<string, unknown>;
 }
@@ -90,13 +77,13 @@ export interface RecallResultItem {
 export interface RecallRouting {
   shape_resolved: RecallShape;
   shape_source: ShapeSource;
-  legs_queried: Array<"koi" | "graphiti">;
+  legs_queried: Array<"hybrid" | "walk">;
 }
 
 export interface RecallLatency {
   total: number;
-  koi: number | null;
-  graphiti: number | null;
+  hybrid: number | null;
+  walk: number | null;
 }
 
 export interface RecallResponse {
@@ -146,7 +133,7 @@ async function queryKoi(
       items.push({
         id: String(id),
         score: typeof r.score === "number" ? (r.score as number) : 0,
-        leg: "koi",
+        leg: "hybrid",
         content: text,
         metadata: {
           source: sourceRaw,
@@ -173,24 +160,15 @@ async function queryKoi(
   }
 }
 
-// --- Graphiti leg ---
-function resolveGraphitiSidecar(): string {
-  // Phase 6 (2026-04-29): default flipped to 'koi' (PostgreSQL recursive-CTE
-  // walk). Revert mechanism preserved via RECALL_BACKEND=graphiti env flag —
-  // routes back to FalkorDB sidecar while it's still alive (tear-out is
-  // Phase 9 tomorrow after overnight bake-in). Both sidecars have identical
-  // I/O contracts so downstream parsing in queryGraphiti() is unchanged.
-  const backend = (process.env.RECALL_BACKEND ?? "koi").toLowerCase();
-  if (backend === "graphiti") {
-    if (fs.existsSync(GRAPHITI_SIDECAR_PATH)) return GRAPHITI_SIDECAR_PATH;
-    return GRAPHITI_SIDECAR_FALLBACK;
-  }
-  // Default + explicit 'koi' both route to koi_recall.py.
-  if (fs.existsSync(KOI_RECALL_SIDECAR_PATH)) return KOI_RECALL_SIDECAR_PATH;
-  return KOI_RECALL_SIDECAR_FALLBACK;
+// --- Walk leg (PostgreSQL recursive-CTE over knowledge_facts) ---
+function resolveWalkSidecar(): string {
+  // Tier-3 (2026-04-30 Wave 1): FalkorDB sidecar retired; only the
+  // koi_recall.py PostgreSQL walk remains. RECALL_BACKEND env flag removed.
+  if (fs.existsSync(RECALL_WALK_SIDECAR_PATH)) return RECALL_WALK_SIDECAR_PATH;
+  return RECALL_WALK_SIDECAR_FALLBACK;
 }
 
-async function queryGraphiti(
+async function queryWalk(
   query: string,
   limit: number,
 ): Promise<{
@@ -201,9 +179,7 @@ async function queryGraphiti(
 }> {
   const t0 = Date.now();
   return new Promise((resolve) => {
-    const sidecarPath = resolveGraphitiSidecar();
-    // Phase 6: default backend is 'koi'; explicit 'graphiti' opts out.
-    const backend = (process.env.RECALL_BACKEND ?? "koi").toLowerCase();
+    const sidecarPath = resolveWalkSidecar();
     const args = [
       sidecarPath,
       "--query",
@@ -211,16 +187,11 @@ async function queryGraphiti(
       "--limit",
       String(limit),
       "--group-id",
-      GRAPHITI_GROUP_ID,
+      KOI_CANON_GROUP_ID,
     ];
-    // Phase 6: graphiti_recall.py needs the graphiti-poc venv (graphiti-core
-    // import); koi_recall.py needs only httpx (system python is fine, but
-    // graphiti-poc venv also works since httpx is installed there).
+    // koi_recall.py needs only httpx; system python3 is sufficient.
     // KOI_RECALL_PYTHON env override available for unusual python locations.
-    const pythonBin =
-      backend === "graphiti"
-        ? GRAPHITI_PYTHON
-        : (process.env.KOI_RECALL_PYTHON || "/usr/bin/python3");
+    const pythonBin = process.env.KOI_RECALL_PYTHON || "/usr/bin/python3";
     const proc = spawn(pythonBin, args, {
       env: { ...process.env },
     });
@@ -250,7 +221,7 @@ async function queryGraphiti(
         results: [],
         raw: {},
         latency_ms: Date.now() - t0,
-        error: `graphiti spawn error: ${err.message}`,
+        error: `walk spawn error: ${err.message}`,
       });
     });
     proc.on("close", (code: number | null) => {
@@ -260,7 +231,7 @@ async function queryGraphiti(
           results: [],
           raw: {},
           latency_ms: lat,
-          error: `graphiti exited ${code}: ${stderr.slice(0, 300)}`,
+          error: `walk exited ${code}: ${stderr.slice(0, 300)}`,
         });
         return;
       }
@@ -272,7 +243,7 @@ async function queryGraphiti(
           results: [],
           raw: {},
           latency_ms: lat,
-          error: `graphiti stdout parse error: ${(e as Error).message}`,
+          error: `walk stdout parse error: ${(e as Error).message}`,
         });
         return;
       }
@@ -281,14 +252,14 @@ async function queryGraphiti(
           results: [],
           raw: parsed || {},
           latency_ms: lat,
-          error: `graphiti not ok: ${parsed?.error || "unknown"}`,
+          error: `walk not ok: ${parsed?.error || "unknown"}`,
         });
         return;
       }
-      // Map Graphiti session_ids + edges to RecallResultItem[].
-      // Edges carry the structural payload; session_ids surface separately
-      // so callers can score against ground-truth UUIDs (matches POC bench
-      // expectation).
+      // Map walk session_ids + edges to RecallResultItem[].
+      // Edges carry the structural payload (knowledge_facts rows with
+      // valid_from/valid_to); session_ids surface separately so callers
+      // can score against ground-truth UUIDs (matches POC bench expectation).
       const items: RecallResultItem[] = [];
       const sessionIds = (parsed.session_ids as string[]) || [];
       const edges = (parsed.edges as Array<Record<string, unknown>>) || [];
@@ -296,12 +267,12 @@ async function queryGraphiti(
       for (const sid of sessionIds) {
         items.push({
           id: sid,
-          score: 1.0, // Graphiti's hybrid edge search is rank-ordered; uniform 1.0
-          leg: "graphiti",
+          score: 1.0, // walk results are rank-ordered; uniform 1.0
+          leg: "walk",
           content: `claude-code session ${sid}`,
           metadata: {
             session_id: sid,
-            source: "graphiti_session_entity",
+            source: "walk_session_entity",
           },
         });
         if (items.length >= limit) break;
@@ -314,10 +285,10 @@ async function queryGraphiti(
           items.push({
             id: String(e.name || ""),
             score: 0.5,
-            leg: "graphiti",
+            leg: "walk",
             content: String(e.fact || ""),
             metadata: {
-              source: "graphiti_edge",
+              source: "walk_edge",
               valid_at: e.valid_at,
               edge_name: e.name,
             },
@@ -337,9 +308,9 @@ async function queryGraphiti(
         results: [],
         raw: {},
         latency_ms: Date.now() - t0,
-        error: `graphiti timeout after ${GRAPHITI_TIMEOUT_MS}ms`,
+        error: `walk timeout after ${RECALL_WALK_TIMEOUT_MS}ms`,
       });
-    }, GRAPHITI_TIMEOUT_MS);
+    }, RECALL_WALK_TIMEOUT_MS);
   });
 }
 
@@ -367,8 +338,8 @@ function emitMetrics(
       shape_source: routing.shape_source,
       legs_queried: routing.legs_queried,
       latency_ms_total: latency.total,
-      latency_ms_koi: latency.koi,
-      latency_ms_graphiti: latency.graphiti,
+      latency_ms_hybrid: latency.hybrid,
+      latency_ms_walk: latency.walk,
       error_code: errorCode,
       leg_result_counts: legResultCounts,
     });
@@ -385,7 +356,7 @@ export async function recall(input: RecallInput): Promise<RecallResponse> {
   const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
   const includeLegs = input.include_legs ?? false;
 
-  // Revert mechanism: route ALL queries to KOI when env disabled.
+  // Revert mechanism: route ALL queries to hybrid when env disabled.
   const routingEnabled =
     (process.env.RECALL_ROUTING_ENABLED ?? "true").toLowerCase() !== "false";
 
@@ -395,62 +366,61 @@ export async function recall(input: RecallInput): Promise<RecallResponse> {
     routing = {
       shape_resolved: "semantic",
       shape_source: "fallback", // env-flag override registered as fallback for observability
-      legs_queried: ["koi"],
+      legs_queried: ["hybrid"],
     };
   } else {
     const r = resolveShape(query, input.shape);
     routing = {
       shape_resolved: r.shape,
       shape_source: r.source,
-      legs_queried: r.shape === "semantic" ? ["koi"] : ["graphiti"],
+      legs_queried: r.shape === "semantic" ? ["hybrid"] : ["walk"],
     };
   }
 
   // 2. Dispatch to leg.
-  const latency: RecallLatency = { total: 0, koi: null, graphiti: null };
+  const latency: RecallLatency = { total: 0, hybrid: null, walk: null };
   let results: RecallResultItem[] = [];
   let errorCode: "substrate_unavailable" | undefined;
   let errorText: string | undefined;
   const legsRaw: Record<string, unknown> = {};
 
   if (routing.shape_resolved === "semantic") {
-    const koi = await queryKoi(query, limit);
-    latency.koi = koi.latency_ms;
-    if (koi.error) {
-      // Both KOI fail = substrate unavailable; Graphiti alone is insufficient.
+    const hybrid = await queryKoi(query, limit);
+    latency.hybrid = hybrid.latency_ms;
+    if (hybrid.error) {
       errorCode = "substrate_unavailable";
-      errorText = koi.error;
+      errorText = hybrid.error;
     } else {
-      results = koi.results;
+      results = hybrid.results;
     }
-    if (includeLegs) legsRaw.koi = koi.raw;
+    if (includeLegs) legsRaw.hybrid = hybrid.raw;
   } else {
-    // temporal | relationship → Graphiti, with KOI fallback on Graphiti failure.
-    const graphiti = await queryGraphiti(query, limit);
-    latency.graphiti = graphiti.latency_ms;
-    if (graphiti.error || graphiti.results.length === 0) {
-      // Fall through to KOI hybrid (acceptable degradation per plan §Strand C).
-      const koi = await queryKoi(query, limit);
-      latency.koi = koi.latency_ms;
-      if (koi.error) {
+    // temporal | relationship → walk, with hybrid fallback on walk failure.
+    const walk = await queryWalk(query, limit);
+    latency.walk = walk.latency_ms;
+    if (walk.error || walk.results.length === 0) {
+      // Fall through to hybrid retrieval (acceptable degradation per plan §Strand C).
+      const hybrid = await queryKoi(query, limit);
+      latency.hybrid = hybrid.latency_ms;
+      if (hybrid.error) {
         errorCode = "substrate_unavailable";
-        errorText = `graphiti: ${graphiti.error || "no results"} | koi: ${koi.error}`;
+        errorText = `walk: ${walk.error || "no results"} | hybrid: ${hybrid.error}`;
       } else {
-        results = koi.results;
+        results = hybrid.results;
         // Mark fallback in routing.
         routing = {
           shape_resolved: routing.shape_resolved,
           shape_source: "fallback",
-          legs_queried: ["graphiti", "koi"],
+          legs_queried: ["walk", "hybrid"],
         };
       }
       if (includeLegs) {
-        legsRaw.graphiti = graphiti.raw;
-        legsRaw.koi = koi.raw;
+        legsRaw.walk = walk.raw;
+        legsRaw.hybrid = hybrid.raw;
       }
     } else {
-      results = graphiti.results;
-      if (includeLegs) legsRaw.graphiti = graphiti.raw;
+      results = walk.results;
+      if (includeLegs) legsRaw.walk = walk.raw;
     }
   }
 

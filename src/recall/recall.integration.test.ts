@@ -118,7 +118,7 @@ function validateShape(resp: RecallResponse): { ok: boolean; reasons: string[] }
   if (resp.latency_ms) {
     if (typeof resp.latency_ms.total !== "number")
       reasons.push("latency_ms.total not number");
-    // koi/graphiti can be null — that's per spec
+    // hybrid/walk can be null — that's per spec
   }
   for (const r of resp.results) {
     if (!r.id) {
@@ -129,7 +129,7 @@ function validateShape(resp: RecallResponse): { ok: boolean; reasons: string[] }
       reasons.push("result item score not number");
       break;
     }
-    if (!["koi", "graphiti"].includes(r.leg)) {
+    if (!["hybrid", "walk"].includes(r.leg)) {
       reasons.push(`result item leg invalid: ${r.leg}`);
       break;
     }
@@ -153,8 +153,8 @@ async function main() {
     shape_resolved: string;
     shape_source: string;
     latency_total: number;
-    latency_koi: number | null;
-    latency_graphiti: number | null;
+    latency_hybrid: number | null;
+    latency_walk: number | null;
     recall_5: number;
     n_results: number;
     shape_ok: boolean;
@@ -177,8 +177,8 @@ async function main() {
         shape_resolved: "error",
         shape_source: "error",
         latency_total: Date.now() - t0,
-        latency_koi: null,
-        latency_graphiti: null,
+        latency_hybrid: null,
+        latency_walk: null,
         recall_5: 0,
         n_results: 0,
         shape_ok: false,
@@ -201,8 +201,8 @@ async function main() {
       shape_resolved: resp.routing.shape_resolved,
       shape_source: resp.routing.shape_source,
       latency_total: resp.latency_ms.total,
-      latency_koi: resp.latency_ms.koi,
-      latency_graphiti: resp.latency_ms.graphiti,
+      latency_hybrid: resp.latency_ms.hybrid,
+      latency_walk: resp.latency_ms.walk,
       recall_5: r5,
       n_results: resp.results.length,
       shape_ok: validation.ok,
@@ -212,7 +212,7 @@ async function main() {
 
     console.log(
       `r@5=${r5.toFixed(2)} shape=${resp.routing.shape_resolved}/${resp.routing.shape_source} ` +
-        `latency=${resp.latency_ms.total}ms (k=${resp.latency_ms.koi}, g=${resp.latency_ms.graphiti}) ` +
+        `latency=${resp.latency_ms.total}ms (h=${resp.latency_ms.hybrid}, w=${resp.latency_ms.walk}) ` +
         `n=${resp.results.length}`,
     );
   }
@@ -220,13 +220,13 @@ async function main() {
   // Summary table
   console.log("");
   console.log(
-    "| Query | Shape resolved/source | recall@5 | latency total/koi/graphiti | shape_ok |",
+    "| Query | Shape resolved/source | recall@5 | latency total/hybrid/walk | shape_ok |",
   );
   console.log(
     "|-------|----------------------|----------|----------------------------|----------|",
   );
   for (const r of rows) {
-    const lat = `${r.latency_total}/${r.latency_koi ?? "-"}/${r.latency_graphiti ?? "-"} ms`;
+    const lat = `${r.latency_total}/${r.latency_hybrid ?? "-"}/${r.latency_walk ?? "-"} ms`;
     console.log(
       `| ${r.id} | ${r.shape_resolved}/${r.shape_source} | ${r.recall_5.toFixed(2)} | ${lat} | ${r.shape_ok ? "yes" : "NO: " + (r.error || "")} |`,
     );

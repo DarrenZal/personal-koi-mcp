@@ -116,14 +116,15 @@ export interface DispatchInput {
 export interface DispatchResult {
   results: unknown[];
   legs_queried: string[];
-  latency_ms: { total: number; koi: number | null; graphiti: number | null };
+  latency_ms: { total: number; hybrid: number | null; walk: number | null };
 }
 
 export async function dispatchToLeg(input: DispatchInput): Promise<DispatchResult> {
-  // Step 6 will replace this with real KOI HTTP / Graphiti subprocess calls.
-  // Step 4 only defines the call sites + type contract.
+  // Stub kept for Step 4 type contract; real implementation lives in
+  // src/tools/recall.ts (Tier-3, Wave 1 close-out 2026-04-30: hybrid +
+  // walk legs against PostgreSQL substrate).
   void input;
   throw new Error(
-    "recall dispatch not yet wired — Step 6 implements KOI + Graphiti backends",
+    "recall dispatch stub — see src/tools/recall.ts for the wired implementation",
   );
 }

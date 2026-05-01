@@ -1,7 +1,7 @@
 {
   "name": "personal-koi-mcp",
-  "version": "1.2.0",
-  "description": "Personal KOI MCP server with local Obsidian vault integration. Tier-3 1.2.0: `recall` MCP tool default backend flipped to KOI-native PostgreSQL recursive-CTE walk over knowledge_facts (replaces Graphiti FalkorDB sidecar). Revert via RECALL_BACKEND=graphiti env flag.",
+  "version": "1.2.1",
+  "description": "Personal KOI MCP server with local Obsidian vault integration. Tier-3: `recall` MCP tool routes shape-aware queries across hybrid (RRF unified-search) + walk (recursive-CTE over knowledge_facts) legs of the PostgreSQL substrate. Single-substrate operation; Graphiti FalkorDB sidecar retired 2026-04-30.",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
