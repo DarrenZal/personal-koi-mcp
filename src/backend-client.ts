@@ -239,24 +239,38 @@ export class BackendClient {
   }
 
   /**
-   * Mark the backend as unavailable (e.g., after a connection error).
-   * Forces the next isAvailable() call to re-check, and causes callers
-   * to take the fallback path immediately.
+   * Mark the backend as unavailable (e.g., after a per-call timeout or
+   * connection error). A single op failure does NOT mean the backend is down,
+   * so we deliberately reset the health-check cache (set _lastHealthCheck = 0)
+   * to force the NEXT isAvailable() call to re-probe /health rather than
+   * trusting this cached negative for HEALTH_CHECK_INTERVAL.
+   *
+   * Without this reset, a single 30s ingest timeout would short-circuit all
+   * subsequent backend calls to vault-only fallback for the next 30 seconds —
+   * a sticky false-negative that masquerades as backend downtime. See
+   * Meta/Entity Resolution Issues.md → ## Tooling Issues →
+   * mcp-negative-cache-poisoning for the original incident.
    */
   markUnavailable(): void {
     this._isAvailable = false;
-    this._lastHealthCheck = Date.now();
+    this._lastHealthCheck = 0; // force re-probe on next isAvailable() call
   }
 
   /**
-   * Check if the backend is available
+   * Check if the backend is available.
+   *
+   * Caching policy: positive results cache for HEALTH_CHECK_INTERVAL (30s).
+   * Negative results are NEVER served from cache when _lastHealthCheck = 0
+   * (markUnavailable's reset value), forcing a fresh /health probe.
    */
   async isAvailable(): Promise<boolean> {
     const now = Date.now();
 
-    // Use cached result if recent
+    // Use cached result if recent. _lastHealthCheck = 0 forces re-probe (set
+    // by markUnavailable() to avoid sticky negative caching).
     if (
       this._isAvailable !== null &&
+      this._lastHealthCheck > 0 &&
       now - this._lastHealthCheck < this.HEALTH_CHECK_INTERVAL
     ) {
       return this._isAvailable;
