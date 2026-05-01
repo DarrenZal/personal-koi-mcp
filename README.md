@@ -73,24 +73,23 @@ recall(query="herring habitat", shape="semantic")                               
 search(query="hackathon", source="email")
 ```
 
-#### `recall` MCP tool (Tier-3 1.2.0 — 2026-04-29)
+#### `recall` MCP tool (Tier-3 1.2.0)
 
-Routes by query shape:
-- `semantic`     → KOI hybrid retrieval (`/knowledge/unified-search` over entities/facts/sessions/wiki/vault)
-- `temporal`     → KOI recursive-CTE walk (`/knowledge/recall-walk` over `knowledge_facts` with `valid_to IS NULL`)
-- `relationship` → KOI recursive-CTE walk (same backend; expired edges included with `expired: true`)
+Routes by query shape across two PostgreSQL substrate legs:
+- `semantic`     → **hybrid** leg: `/knowledge/unified-search` (RRF over entities/facts/sessions/wiki/vault)
+- `temporal`     → **walk** leg: `/knowledge/recall-walk` (recursive-CTE over `knowledge_facts` with `valid_to IS NULL`)
+- `relationship` → **walk** leg: same endpoint; expired edges included with `expired: true` marker
 
-**Tier-3 architectural correction (1.2.0)**: previously the temporal/relationship leg routed to a Graphiti FalkorDB sidecar; that sidecar is being retired (Phase 9 tear-out scheduled tomorrow after overnight bake-in). The replacement walks the existing PostgreSQL `knowledge_facts` table (bi-temporal `valid_from`/`valid_to`, embedded fact text, episode anchoring, idempotent dedup with cosine>0.95 supersession). Single-substrate now.
+**Tier-3 architectural correction (1.2.0 — 2026-04-29 Phases 1-7 + 2026-04-30 Wave 1 close-out)**: the prior Tier-2 architecture routed temporal/relationship queries to a Graphiti FalkorDB sidecar; that sidecar has been retired in favor of native PostgreSQL machinery. `knowledge_facts` (migration 079) provides graphiti's `EntityEdge` semantics: bi-temporal `valid_from`/`valid_to`, edge embeddings (`fact_embedding_3072`), episode anchoring (`episode_id` FK), idempotent dedup with predicate-aware cosine + supersession. Single-substrate; no sidecar tax.
 
 Failure semantics:
 - KOI unreachable → returns `error_code: "substrate_unavailable"` (both legs share the substrate).
-- KOI walk endpoint error → falls back to `/knowledge/unified-search`; response carries `routing.shape_source = "fallback"`. Not an error to caller.
+- Walk endpoint error or 0 results → falls back to `/knowledge/unified-search`; response carries `routing.shape_source = "fallback"`. Not an error to caller.
 
-**Revert mechanisms**:
-- `RECALL_BACKEND=graphiti` — explicit revert to FalkorDB sidecar (still alive through Phase 9 tomorrow). Flip-flop is hot — env var is read per-call by the recall handler; no MCP-server-process restart required.
-- `RECALL_ROUTING_ENABLED=false` — disables shape routing entirely; all queries forced to KOI hybrid (`legs_queried=["koi"]`, `shape_source="fallback"`).
+**Revert mechanism**:
+- `RECALL_ROUTING_ENABLED=false` — disables shape routing entirely; all queries forced to hybrid leg (`legs_queried=["hybrid"]`, `shape_source="fallback"`). Flip-flop is hot — env var is read per-call by the recall handler.
 
-Per-call observability: every invocation appends a JSON line to `~/.koi/logs/recall-metrics.jsonl`.
+Per-call observability: every invocation appends a JSON line to `~/.koi/logs/recall-metrics.jsonl` with `legs_queried`, `latency_ms_hybrid`, `latency_ms_walk`, and `leg_result_counts`.
 
 ### Vault Operations
 
