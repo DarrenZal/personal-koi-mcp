@@ -900,7 +900,7 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'crawl_site',
     description:
-      'Run the agentic web crawl flow end-to-end against a site, wait for the proposal, and commit it with any extra relate clauses from the instruction.',
+      'Start an agentic web crawl. Waits up to wait_seconds (default 60) for completion; if the crawl is still running after that, returns {job_id, status: "running", progress} so the caller can release the conversation and check back via crawl_status later. When the crawl completes inside the wait window, the proposal is committed automatically with any extra relate-clauses from the instruction. Server-side budget defaults: 180s wall-clock, 40 pages, $0.50, 20 vision calls. Ceilings: 300s, 60 pages, $1.00, 30 vision calls.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -909,8 +909,47 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
           type: 'string',
           description: 'Optional guidance like "map this org and relate to Victoria Landscape Hub"',
         },
+        wait_seconds: {
+          type: 'integer',
+          description: 'How long to block waiting for completion before returning the in-flight job_id. Default 60. Keep well below the parent agent\'s subprocess timeout. If the crawl is still running when this elapses, the worker continues server-side — call crawl_status(job_id) to check on it.',
+        },
+        max_seconds: {
+          type: 'integer',
+          description: 'Server-side wall-clock budget. Default 180; ceiling 300.',
+        },
+        max_pages: {
+          type: 'integer',
+          description: 'Server-side page-count budget. Default 40; ceiling 60.',
+        },
+        max_usd: {
+          type: 'number',
+          description: 'Server-side cost budget USD. Default 0.50; ceiling 1.00.',
+        },
+        max_vision_calls: {
+          type: 'integer',
+          description: 'Server-side vision-call budget. Default 20; ceiling 30.',
+        },
       },
       required: ['url'],
+    },
+  },
+  {
+    name: 'crawl_status',
+    description:
+      'Check the status of an in-flight crawl job started by crawl_site. If the job has reached status=done, automatically commits the proposal (with any extra relate-clauses from the optional instruction) and returns the final result. If still running, returns current progress. Idempotent for already-committed jobs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: {
+          type: 'integer',
+          description: 'The crawl job_id returned by crawl_site.',
+        },
+        instruction: {
+          type: 'string',
+          description: 'Optional relate-clause instruction (same form as crawl_site). Used only at commit time when status=done.',
+        },
+      },
+      required: ['job_id'],
     },
   },
   {
@@ -1569,8 +1608,10 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
             type: 'object',
             properties: {
               subject: { type: 'string', description: 'Entity name for the subject' },
+              subject_type: { type: 'string', description: 'Optional type hint for the subject (Person, Organization, Place, Project, Concept). Used only when the entity does not yet exist in the registry — existing rows preserve their type. Without this, new entities default to Concept regardless of what they are. Provide whenever the subject is clearly typed (a Person predicate like SIBLING_OF / FOUNDED, an Organization predicate, etc.).' },
               predicate: { type: 'string', description: 'Relationship type in UPPER_CASE (e.g., USES, DEVELOPS, MEMBER_OF)' },
               object: { type: 'string', description: 'Entity name for the object (if entity reference)' },
+              object_type: { type: 'string', description: 'Optional type hint for the object — parallels subject_type, same semantics.' },
               object_literal: { type: 'string', description: 'Free text value (if not an entity)' },
               fact_text: { type: 'string', description: 'Natural language sentence describing this fact' },
               valid_from: { type: 'string', description: 'ISO date when fact became true' },
@@ -1909,14 +1950,27 @@ export async function handleKoiApiTool(
             }))
           : [];
 
+        const budget: Record<string, number> = {};
+        if (typeof args.max_pages === 'number') budget.max_pages = args.max_pages as number;
+        if (typeof args.max_seconds === 'number') budget.max_seconds = args.max_seconds as number;
+        if (typeof args.max_usd === 'number') budget.max_usd = args.max_usd as number;
+        if (typeof args.max_vision_calls === 'number') budget.max_vision_calls = args.max_vision_calls as number;
         const enqueue = await client.post(
           '/web/crawl-agentic',
-          { url: args.url, goal: instruction || undefined },
+          {
+            url: args.url,
+            goal: instruction || undefined,
+            ...(Object.keys(budget).length ? { budget } : {}),
+          },
           { headers: crawlHeaders },
         );
         const jobId = Number(enqueue.data?.job_id);
         const progressLines: string[] = [`Started crawl job ${jobId} as ${submittedBy}`];
+        const waitSeconds = typeof args.wait_seconds === 'number' ? Math.max(5, args.wait_seconds as number) : 60;
+        const terminalStatuses = ['done', 'failed', 'cancelled', 'interrupted', 'committed', 'partially_committed'];
+        const deadline = Date.now() + waitSeconds * 1000;
         let finalJob: any = null;
+        let timedOutInWaitWindow = false;
 
         for (;;) {
           const { data } = await client.get(`/web/crawl-jobs/${jobId}`, { headers: crawlHeaders });
@@ -1925,10 +1979,31 @@ export async function handleKoiApiTool(
           progressLines.push(
             `status=${data.status} pages=${progress.pages_visited || 0} entities=${progress.entities_so_far || 0} cost=$${Number(data.cost_usd || 0).toFixed(4)}`
           );
-          if (['done', 'failed', 'cancelled', 'interrupted', 'committed', 'partially_committed'].includes(String(data.status))) {
+          if (terminalStatuses.includes(String(data.status))) {
+            break;
+          }
+          if (Date.now() >= deadline) {
+            timedOutInWaitWindow = true;
             break;
           }
           await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+
+        if (timedOutInWaitWindow) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                job_id: jobId,
+                submitted_by: submittedBy,
+                status: finalJob?.status || 'running',
+                still_running: true,
+                progress: finalJob?.progress || {},
+                progress_log: progressLines,
+                hint: `Crawl is still running server-side. Call crawl_status(job_id=${jobId}${instruction ? `, instruction=${JSON.stringify(instruction)}` : ''}) to check on it.`,
+              }, null, 2),
+            }],
+          };
         }
 
         if (!finalJob || finalJob.status !== 'done') {
@@ -1968,6 +2043,107 @@ export async function handleKoiApiTool(
               submitted_by: submittedBy,
               progress_log: progressLines,
               proposal_stats: finalJob.result?.stats || null,
+              commit: commit.data,
+            }, null, 2),
+          }],
+        };
+      }
+
+      case 'crawl_status': {
+        const crawlHeaders = await getMcpCrawlHeaders();
+        const jobId = Number(args.job_id);
+        if (!Number.isFinite(jobId)) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: 'job_id is required and must be a number' }) }],
+            isError: true,
+          };
+        }
+        const instruction = (args.instruction as string | undefined)?.trim();
+
+        const { data: job } = await client.get(`/web/crawl-jobs/${jobId}`, { headers: crawlHeaders });
+        const status = String(job?.status);
+
+        if (status === 'committed' || status === 'partially_committed') {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                job_id: jobId,
+                status,
+                already_committed: true,
+                progress: job?.progress || {},
+                proposal_stats: job?.result?.stats || null,
+              }, null, 2),
+            }],
+          };
+        }
+
+        if (status === 'queued' || status === 'running') {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                job_id: jobId,
+                status,
+                still_running: true,
+                progress: job?.progress || {},
+                hint: 'Crawl is still running. Check again in 30–60 seconds.',
+              }, null, 2),
+            }],
+          };
+        }
+
+        if (status !== 'done') {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                job_id: jobId,
+                status,
+                error: job?.error || null,
+                progress: job?.progress || {},
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+
+        // status === 'done' → commit now (re-parsing instruction if provided).
+        const parseTargets = instruction
+          ? (await client.post(
+              '/tools/parse-relate-clause',
+              { instruction },
+              { headers: crawlHeaders },
+            )).data?.targets || []
+          : [];
+        const extraRelationships = Array.isArray(parseTargets)
+          ? parseTargets.map((target: any) => ({
+              from: 0,
+              predicate: target.predicate_hint || 'related_to',
+              to: target.label,
+            }))
+          : [];
+
+        const commit = await client.post(
+          `/web/crawl-jobs/${jobId}/commit`,
+          {
+            proposal_overrides: {
+              dropped_entity_indices: [],
+              entity_edits: {},
+              dropped_relationship_indices: [],
+            },
+            extra_relationships: extraRelationships,
+          },
+          { headers: crawlHeaders },
+        );
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              job_id: jobId,
+              status: 'done',
+              proposal_stats: job?.result?.stats || null,
               commit: commit.data,
             }, null, 2),
           }],
