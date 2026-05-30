@@ -230,6 +230,21 @@ export function passesFuzzyOverlapCheck(
 
   // Multi-word checks: both sides have ≥2 tokens
   if (tokensA.length >= 2 && tokensB.length >= 2) {
+    // 2-token full-name surname guard (mirrors backend passes_token_overlap_check
+    // in api/personal_ingest_api.py): for two "First Last" names, a shared first
+    // name must NOT inflate the match — require the family names (last tokens) to
+    // be JW-similar, so "Benjamin Life" ≠ "Benjamin Neal" (the originating false
+    // merge from session 4957a381). Threshold matches the backend's 0.75.
+    if (tokensA.length === 2 && tokensB.length === 2) {
+      const lastJw = jaroWinklerSimilarity(tokensA[1], tokensB[1]);
+      if (lastJw < 0.75) {
+        return {
+          ok: false,
+          reason: `2-token names with dissimilar surnames (JW ${lastJw.toFixed(3)} < 0.75): "${tokensA[1]}" vs "${tokensB[1]}"`,
+        };
+      }
+    }
+
     const plainOverlap = [...setA].filter((t) => setB.has(t));
     if (plainOverlap.length === 0) {
       return {
