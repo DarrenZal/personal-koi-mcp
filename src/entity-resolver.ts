@@ -128,6 +128,148 @@ export function normalizeForComparison(str: string): string {
 }
 
 /**
+ * Words that frequently appear in entity names but carry little
+ * disambiguation value. A fuzzy match whose ONLY overlap is one of these
+ * words has not actually matched; it has matched on shared boilerplate.
+ *
+ * Two layers:
+ *   - Generic: articles, prepositions, conjunctions, structural suffixes
+ *     ("foundation", "institute", "labs", etc.).
+ *   - Domain prefixes: cluster-specific words that dominate the local
+ *     namespace ("regen" appears in many distinct Regen Network projects;
+ *     "claims" appears in many distinct claims-related concepts). These
+ *     are added because they're frequent enough in this vault to act as
+ *     common words even though they're domain-meaningful.
+ */
+const COMMON_WORDS = new Set<string>([
+  // articles, prepositions, conjunctions
+  'a', 'an', 'the', 'of', 'for', 'and', 'or', 'in', 'at', 'by', 'to', 'with', 'on',
+  // structural suffixes
+  'network', 'foundation', 'institute', 'project', 'projects', 'group', 'lab',
+  'labs', 'capital', 'system', 'systems', 'hub', 'centre', 'center',
+  'international', 'org', 'inc', 'llc', 'corp', 'company', 'co',
+  'platform', 'service', 'services', 'protocol', 'app',
+  // domain prefixes (vault-cluster-specific; tune as patterns emerge)
+  'regen', 'koi', 'gaia', 'spore',
+]);
+
+/**
+ * Compute the set of "distinctive words" in a name — tokens after lowercase,
+ * with COMMON_WORDS filtered out. Used as the secondary check after token-set
+ * overlap, to catch matches where the only shared tokens are common words.
+ */
+function distinctiveWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((tok) => tok.length > 0 && !COMMON_WORDS.has(tok)),
+  );
+}
+
+/**
+ * Strict overlap check for fuzzy matches.
+ *
+ * Returns false (rejecting the match) if any of the following holds:
+ *   - Length-ratio: the longer string is >1.8× the shorter AND JW < 0.95
+ *     (catches prefix-match inflation like "regen ai" vs "regen ai bd sprint scope").
+ *   - Multi-word collapse: BOTH names have ≥2 tokens AND they share zero
+ *     plain tokens (catches "Silke Helfrich" → "Simon Grant").
+ *   - Domain-prefix collapse: BOTH names have ≥2 tokens AND their distinctive
+ *     words (after COMMON_WORDS filter) share zero overlap (catches
+ *     "Common Crawl Foundation" → "Cosmo Local Foundation": only "foundation"
+ *     overlaps; once filtered, distinctive sets {common, crawl} and
+ *     {cosmo, local} are disjoint. Same pattern as "Regen Compass" →
+ *     "Regen AI Builders": only "regen" overlaps; distinctive sets
+ *     {compass} and {ai, builders} are disjoint).
+ *
+ * Single-word inputs (or single-word candidates) are not subject to the
+ * multi-word checks, but their JW threshold is enforced upstream by the
+ * caller.
+ */
+export function passesFuzzyOverlapCheck(
+  inputName: string,
+  candidateName: string,
+  jwScore: number,
+): { ok: true } | { ok: false; reason: string } {
+  const a = inputName.toLowerCase().trim();
+  const b = candidateName.toLowerCase().trim();
+
+  // Length-ratio guard
+  const shorter = Math.min(a.length, b.length);
+  const longer = Math.max(a.length, b.length);
+  if (shorter > 0 && longer / shorter > 1.8 && jwScore < 0.95) {
+    return {
+      ok: false,
+      reason: `length ratio ${(longer / shorter).toFixed(1)}× with JW ${jwScore.toFixed(3)} < 0.95`,
+    };
+  }
+
+  const tokensA = a.split(/\s+/).filter((t) => t.length > 0);
+  const tokensB = b.split(/\s+/).filter((t) => t.length > 0);
+  const setA = new Set(tokensA);
+  const setB = new Set(tokensB);
+
+  // Single-token strict-JW guard. When EITHER side is one token (e.g. "RegenOS",
+  // "Microsoft", "Marie"), JW dominates because there's no token-set structure
+  // to check. Without a strict bar, "Regen Compass" (2 tokens) merges into
+  // "RegenOS" (1 token) at JW=0.92 because the resolver's threshold is 0.85.
+  // Backend resolver does the same thing (see api/personal_ingest_api.py
+  // passes_token_overlap_check single-word branch). Single-word matches
+  // require JW ≥ 0.95 — and the multi-word distinctive-word check below
+  // is skipped (it requires ≥2 tokens on both sides).
+  if (tokensA.length === 1 || tokensB.length === 1) {
+    if (jwScore < 0.95) {
+      return {
+        ok: false,
+        reason: `single-token side requires JW ≥ 0.95, got ${jwScore.toFixed(3)}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  // Multi-word checks: both sides have ≥2 tokens
+  if (tokensA.length >= 2 && tokensB.length >= 2) {
+    const plainOverlap = [...setA].filter((t) => setB.has(t));
+    if (plainOverlap.length === 0) {
+      return {
+        ok: false,
+        reason: `zero token overlap between multi-word names`,
+      };
+    }
+
+    const distA = distinctiveWords(a);
+    const distB = distinctiveWords(b);
+    if (distA.size === 0 || distB.size === 0) {
+      // Either side has no distinctive words after filtering. Two cases:
+      //   - Both empty: the names are entirely common words (e.g.
+      //     "Regen Network" vs "Regen Foundation" — both filter to {}).
+      //     Genuine same-entity would have hit Tier 1 exact match, so a fuzzy
+      //     hit between two all-common-words names is suspect. Reject.
+      //   - Asymmetric (one empty, one not): the all-common-words side is
+      //     too generic to safely claim a distinctive-content candidate
+      //     (e.g. "Regen OS" {os} vs "Regen KOI" {}). Reject.
+      return {
+        ok: false,
+        reason:
+          distA.size === 0 && distB.size === 0
+            ? `both names entirely COMMON_WORDS (only shared tokens: ${plainOverlap.join(',')})`
+            : `asymmetric distinctive content (one side filters to all COMMON_WORDS, other has distinctive tokens) — too generic to merge`,
+      };
+    }
+    const distOverlap = [...distA].filter((t) => distB.has(t));
+    if (distOverlap.length === 0) {
+      return {
+        ok: false,
+        reason: `distinctive-word overlap = 0 (only COMMON_WORDS shared: ${plainOverlap.join(',')})`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
  * Build a lookup index from vault entities
  */
 export function buildEntityLookup(entities: VaultEntity[]): {
@@ -229,24 +371,52 @@ export class EntityResolver {
     let bestMatch: { entity: VaultEntity; score: number } | null = null;
 
     for (const candidate of entitiesToSearch) {
+      const candidateNormalized = normalizeForComparison(candidate.name);
+
       // Compare with name
-      const nameScore = jaroWinklerSimilarity(
-        normalizedName,
-        normalizeForComparison(candidate.name)
-      );
+      const nameScore = jaroWinklerSimilarity(normalizedName, candidateNormalized);
 
       if (nameScore >= threshold && (!bestMatch || nameScore > bestMatch.score)) {
-        bestMatch = { entity: candidate, score: nameScore };
+        // Distinctive-word + length-ratio guard. Without this, "Common Crawl
+        // Foundation" merges into "Cosmo Local Foundation" at JW=0.88 because
+        // the shared "foundation" suffix dominates. Same failure shape collapses
+        // "Regen Compass" into "Regen AI Builders". The guard rejects matches
+        // whose only token overlap is COMMON_WORDS.
+        const guard = passesFuzzyOverlapCheck(
+          normalizedName,
+          candidateNormalized,
+          nameScore,
+        );
+        if (guard.ok) {
+          bestMatch = { entity: candidate, score: nameScore };
+        }
+        // Failed-guard candidates are silently skipped from bestMatch but may
+        // still appear in `suggestions` below for operator inspection.
       }
 
-      // Compare with aliases
+      // Compare with aliases — apply the SAME guard as for names.
+      //
+      // Earlier this branch was exempted on the theory that aliases are
+      // human-vouched. That was wrong: exact alias match is human-vouched
+      // (Tier 2 above, byAlias.get exact lookup), but FUZZY alias match
+      // is just JW-similarity against an alias string and can false-merge
+      // exactly the same way as fuzzy name match. Real failure that
+      // motivated this fix: "Regen Compass" → "Projects/RegenOS" at
+      // JW=0.923 because RegenOS has alias "Regen OS" and JW("regen
+      // compass","regen os") ≈ 0.92. The guard rejects this (distinctive
+      // overlap = 0; only "regen" shared, which is COMMON_WORDS).
       for (const alias of candidate.aliases) {
-        const aliasScore = jaroWinklerSimilarity(
-          normalizedName,
-          normalizeForComparison(alias)
-        );
+        const aliasNormalized = normalizeForComparison(alias);
+        const aliasScore = jaroWinklerSimilarity(normalizedName, aliasNormalized);
         if (aliasScore >= threshold && (!bestMatch || aliasScore > bestMatch.score)) {
-          bestMatch = { entity: candidate, score: aliasScore };
+          const guard = passesFuzzyOverlapCheck(
+            normalizedName,
+            aliasNormalized,
+            aliasScore,
+          );
+          if (guard.ok) {
+            bestMatch = { entity: candidate, score: aliasScore };
+          }
         }
       }
 
