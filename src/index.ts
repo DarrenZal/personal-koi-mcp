@@ -22,6 +22,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { TOOLS } from './tools.js';
+import { typeToFolderSync } from './entity-schema.js';
 // Use enhanced SPARQL client with focused retrieval
 import { SPARQLClient } from './sparql-client-enhanced.js';
 import { executeGraphTool } from './graph_tool.js';
@@ -4610,13 +4611,26 @@ Your feedback helps improve KOI for everyone.${
           uriToWikilink.set(mapping.canonical_uri, mapping.wikilink);
         }
 
-        // Fallback function for URIs not in vault
+        // Fallback function for URIs not in vault.
+        // IMPORTANT: prefer entity.name (preserves original casing + hyphens)
+        // over BackendClient.uriToVaultPath (which reconstructs from a lossy
+        // lowercase URI slug — turns "Bill C-22" → "Bill C 22", "Indigenomics AI"
+        // → "Indigenomics Ai", and returns "Folder/Unknown" for URIs that don't
+        // match the regex like "project:salish-sea-dreaming").
         const getWikilink = (uri: string, entityType: string, name: string): string => {
           const mapped = uriToWikilink.get(uri);
           if (mapped) return mapped;
-          // Fallback: generate from name and type
-          const fallbackPath = BackendClient.uriToVaultPath(uri, entityType);
-          return `[[${fallbackPath}]]`;
+          // Fallback: build from entity name (authoritative casing/punctuation)
+          const folder = typeToFolderSync(entityType);
+          const safeName = name
+            .replace(/[<>:"/\\|?*]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!safeName) {
+            // Last-resort: only if name is empty, fall back to URI-slug derivation
+            return `[[${BackendClient.uriToVaultPath(uri, entityType)}]]`;
+          }
+          return `[[${folder}/${safeName}]]`;
         };
 
         // Format successful response
