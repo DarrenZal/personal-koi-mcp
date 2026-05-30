@@ -1,3 +1,7 @@
+<!-- workstream: koi-infra -->
+
+> **Stream scope:** koi-infra (this repo + `~/projects/RegenAI/koi-processor`). Cross-stream recommendations require operator opt-in. See `~/CLAUDE.md` "Stream-scope discipline" for rule.
+
 # CLAUDE.md - Personal KOI MCP Server
 
 This file provides guidance to Claude Code when working on the personal-koi-mcp project.
