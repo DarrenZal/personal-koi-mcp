@@ -225,13 +225,119 @@ export class DocumentProcessor {
   }
 
   /**
-   * Apply wikilinks to document content
+   * Compute "protected spans" — regions of the document where wikilinks must
+   * NOT be inserted, because doing so would corrupt existing structure:
+   *
+   * - YAML frontmatter (between the first two `---` fences). Wikilinks in
+   *   YAML scalar values break parsing unless explicitly quoted; safer to
+   *   skip the region entirely.
+   * - Existing wikilink targets `[[...]]` (and aliases). Inserting a
+   *   wikilink inside another wikilink's slug or alias produces nested
+   *   `[[...[[...]]...]]` which Obsidian renders as raw text.
+   * - Markdown link display text and URL `[text](url)`. Injection into
+   *   either side breaks rendering; URL-side injection is silent.
+   * - Inline code spans `` `code` `` and fenced code blocks ``` ``` ```.
+   *
+   * Returns array of [start, end) offset pairs (end-exclusive).
+   */
+  private computeProtectedSpans(content: string): Array<[number, number]> {
+    const spans: Array<[number, number]> = [];
+
+    // 1. YAML frontmatter — only if document starts with `---\n`
+    if (content.startsWith('---\n') || content.startsWith('---\r\n')) {
+      const closeIdx = content.indexOf('\n---', 3);
+      if (closeIdx !== -1) {
+        // Include the closing `---` line so wikilinks aren't inserted on it
+        const lineEnd = content.indexOf('\n', closeIdx + 4);
+        spans.push([0, lineEnd === -1 ? content.length : lineEnd + 1]);
+      }
+    }
+
+    // 2. Fenced code blocks ```...```
+    {
+      const re = /```[\s\S]*?```/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content)) !== null) {
+        spans.push([m.index, m.index + m[0].length]);
+      }
+    }
+
+    // 3. Inline code spans `...` (single-line only; conservative)
+    {
+      const re = /`[^`\n]+`/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content)) !== null) {
+        spans.push([m.index, m.index + m[0].length]);
+      }
+    }
+
+    // 4. Existing wikilinks [[...]] (including aliases [[X|y]])
+    {
+      const re = /\[\[[^\]]+\]\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content)) !== null) {
+        spans.push([m.index, m.index + m[0].length]);
+      }
+    }
+
+    // 5. Markdown links [text](url) — protect both display text and URL.
+    //    Use a tolerant pattern: balance not enforced, but greedy on the URL
+    //    portion up to the first unescaped `)` keeps replacements out of
+    //    long URLs with query strings.
+    {
+      const re = /\[[^\]\n]*\]\([^)\n]*\)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content)) !== null) {
+        spans.push([m.index, m.index + m[0].length]);
+      }
+    }
+
+    return spans;
+  }
+
+  /**
+   * Returns true if the half-open interval [start, end) overlaps any
+   * protected span at all.
+   */
+  private overlapsProtected(
+    start: number,
+    end: number,
+    protectedSpans: Array<[number, number]>,
+  ): boolean {
+    for (const [pStart, pEnd] of protectedSpans) {
+      // Overlap iff start < pEnd && pStart < end
+      if (start < pEnd && pStart < end) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Apply wikilinks to document content.
+   *
+   * Skips any wikilink whose offset range falls inside a protected span
+   * (YAML frontmatter, existing wikilinks, markdown links, code spans/blocks).
+   * Without this guard, naive replacement corrupts already-structured
+   * regions — e.g., injects wikilinks INTO YAML scalar values (breaks
+   * parsing), INTO existing `[[Tasks/...]]` slugs (breaks rendering), or
+   * INTO `[text](url)` markdown link URLs (silently breaks the hyperlink).
    */
   applyWikilinks(content: string, wikilinks: SuggestedWikilink[]): string {
-    // Wikilinks are already sorted in reverse order by offset
+    // Compute protected spans ONCE against the original content. We then
+    // apply wikilinks in reverse-offset order so each replacement doesn't
+    // shift the offsets of earlier-positioned wikilinks. Because we never
+    // insert into protected spans, the protected-span set computed against
+    // the original content remains valid throughout the loop.
+    const protectedSpans = this.computeProtectedSpans(content);
     let result = content;
+    let skipped = 0;
 
     for (const wikilink of wikilinks) {
+      // Skip if this offset overlaps any protected span.
+      if (this.overlapsProtected(wikilink.startOffset, wikilink.endOffset, protectedSpans)) {
+        skipped++;
+        continue;
+      }
+
       // Check that the text at the offset matches what we expect
       const currentText = result.slice(wikilink.startOffset, wikilink.endOffset);
 
@@ -240,6 +346,20 @@ export class DocumentProcessor {
         result = result.slice(0, wikilink.startOffset) +
                  wikilink.replacement +
                  result.slice(wikilink.endOffset);
+      }
+    }
+
+    if (skipped > 0) {
+      // Fire-and-forget logger import to avoid widening this method's deps;
+      // logger is already imported at module level for other call sites.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { logger } = require('./logger');
+        logger.info(
+          `applyWikilinks: skipped ${skipped} wikilinks that fell inside protected spans (frontmatter / existing wikilinks / markdown links / code)`,
+        );
+      } catch {
+        // logger optional
       }
     }
 
