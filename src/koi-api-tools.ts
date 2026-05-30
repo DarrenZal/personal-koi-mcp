@@ -55,6 +55,32 @@ async function getKoiAdminAuthHeaders(): Promise<Record<string, string> | undefi
   return { Authorization: `Bearer ${token}` };
 }
 
+// Service-token auth for the koi-processor admin/claims surface (entity merge,
+// fact retract). The server gate (make_service_token_auth, env
+// KOI_CLAIMS_SERVICE_TOKEN) accepts this fixed token OR a session token. Reads
+// KOI_CLAIMS_SERVICE_TOKEN, falling back to a koi-state file — mirrors
+// getKoiAdminAuthHeaders. Returns undefined if neither is present (the local
+// MCP launch env does not set this by default), so callers surface an
+// actionable error rather than firing an un-authenticated request.
+async function getKoiServiceTokenHeaders(): Promise<Record<string, string> | undefined> {
+  let token = process.env.KOI_CLAIMS_SERVICE_TOKEN;
+  if (!token) {
+    const home = process.env.HOME || '';
+    const defaultStateDir = home ? path.join(home, '.config', 'personal-koi', 'koi-state') : '';
+    const stateDir = process.env.KOI_STATE_DIR || defaultStateDir;
+    if (stateDir) {
+      const tokenPath = path.join(stateDir, 'claims_service_token');
+      try {
+        token = (await fs.readFile(tokenPath, 'utf-8')).trim();
+      } catch {
+        token = undefined;
+      }
+    }
+  }
+  if (!token) return undefined;
+  return { Authorization: `Bearer ${token}` };
+}
+
 function getKoiStateDir(): string {
   const home = process.env.HOME || '';
   const defaultStateDir = home ? path.join(home, '.config', 'personal-koi', 'koi-state') : '';
@@ -1682,6 +1708,44 @@ Examples:
       required: ['query'],
     },
   },
+  {
+    name: 'retract_fact',
+    description: `Retract (soft-expire) a knowledge fact by id — sets valid_to=NOW so it stops being "current" without deleting it (reversible, auditable).
+
+Use when a fact in the knowledge graph is wrong and should be retired. Unlike supersession this needs no replacement fact and works on any fact (including null-object facts). Idempotent: retracting an already-expired fact is a no-op.
+
+Requires the KOI service token (KOI_CLAIMS_SERVICE_TOKEN env or koi-state/claims_service_token file).
+
+Example: retract_fact(fact_id="0898ba34-46d2-412b-8ece-0885f8e40054", reason="wrong author")`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fact_id: { type: 'string', description: 'UUID of the fact (knowledge_facts.id) to retract' },
+        reason: { type: 'string', description: 'Optional human-readable reason (logged for audit)' },
+      },
+      required: ['fact_id'],
+    },
+  },
+  {
+    name: 'merge_entities',
+    description: `Merge a duplicate/mis-typed entity (loser) INTO a survivor, rewiring every reference (facts, relationships, doc-links, claims, tasks, ...) in one transaction, then tombstoning the loser (entity_registry.merged_into). Never hard-deletes.
+
+Use to deduplicate entities or "retype" one (the entity type is encoded in the URI prefix, e.g. …entity:organization-… vs …person-…, so merging into a correctly-typed survivor re-types it). ALWAYS run with dry_run=true first to preview the per-table rewire counts (it rolls back). Idempotent: re-merging loser→same survivor is a no-op; loser→a different survivor is a 409 conflict.
+
+Requires the KOI service token (KOI_CLAIMS_SERVICE_TOKEN env or koi-state/claims_service_token file).
+
+Example: merge_entities(survivor_uri="orn:personal-koi.entity:organization-…", loser_uri="orn:personal-koi.entity:person-…", dry_run=true)`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        survivor_uri: { type: 'string', description: 'fuseki_uri of the entity to KEEP' },
+        loser_uri: { type: 'string', description: 'fuseki_uri of the entity to merge in and tombstone' },
+        merged_by: { type: 'string', description: 'Optional audit actor label' },
+        dry_run: { type: 'boolean', description: 'Preview rewire counts then roll back without committing (default false). Run true first.' },
+      },
+      required: ['survivor_uri', 'loser_uri'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -2437,6 +2501,44 @@ Rules:
           });
           const timer = setTimeout(() => { proc.kill(); done({ content: [{ type: 'text', text: 'vault_concept_search timed out after 15s' }], isError: true }); }, 15000);
         });
+      }
+
+      // --- Admin: fact retraction + entity merge (service-token gated) ---
+      case 'retract_fact': {
+        const headers = await getKoiServiceTokenHeaders();
+        if (!headers) {
+          return {
+            content: [{ type: 'text', text: 'retract_fact requires the KOI service token. Set KOI_CLAIMS_SERVICE_TOKEN in the MCP env or write it to ~/.config/personal-koi/koi-state/claims_service_token.' }],
+            isError: true,
+          };
+        }
+        const factId = args.fact_id as string;
+        const body: Record<string, unknown> = {};
+        if (args.reason !== undefined) body.reason = args.reason;
+        const { data } = await client.post(
+          `/knowledge/facts/${encodeURIComponent(factId)}/retract`,
+          body,
+          { headers }
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'merge_entities': {
+        const headers = await getKoiServiceTokenHeaders();
+        if (!headers) {
+          return {
+            content: [{ type: 'text', text: 'merge_entities requires the KOI service token. Set KOI_CLAIMS_SERVICE_TOKEN in the MCP env or write it to ~/.config/personal-koi/koi-state/claims_service_token.' }],
+            isError: true,
+          };
+        }
+        const body: Record<string, unknown> = {
+          survivor_uri: args.survivor_uri,
+          loser_uri: args.loser_uri,
+        };
+        if (args.merged_by !== undefined) body.merged_by = args.merged_by;
+        if (args.dry_run !== undefined) body.dry_run = args.dry_run;
+        const { data } = await client.post('/entities/merge', body, { headers });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       default:
