@@ -120,7 +120,7 @@ async function queryKoi(
   const t0 = Date.now();
   try {
     const { data } = await koiClient().get("/knowledge/unified-search", {
-      params: { query, limit, include: "entities,facts,sessions,wiki,vault" },
+      params: { query, limit, include: "entities,facts,sessions,wiki,vault,memories" },
     });
     const items: RecallResultItem[] = [];
     const raw = data as Record<string, unknown>;
