@@ -23,9 +23,15 @@ export const GRAPH_QUERY_TYPES = [
   'module_entities',
   'module_for_entity',
 
-  // Cross-file relationship queries
-  'find_importers',
-  'find_implementations',
+  // Code-graph analysis queries (Leiden communities, flows, impact, staleness)
+  'code_impact',
+  'check_staleness',
+  'list_communities',
+  'community_members',
+  'community_for_entity',
+  'list_flows',
+  'flow_steps',
+  'flows_for_entity',
 
   // Concept queries (available but may return empty results)
   'list_concepts',
