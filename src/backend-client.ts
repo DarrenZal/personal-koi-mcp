@@ -316,6 +316,12 @@ export class BackendClient {
    */
   async ingestEntities(request: IngestRequest): Promise<IngestResponse> {
     try {
+      // /ingest runs contextual-candidate + embedding passes server-side and
+      // regularly exceeds the global 30s default on batches >~5 entities;
+      // aborting mid-request leaves half-committed batches. Per-request
+      // override keeps the global default for cheap calls.
+      const ingestTimeout = parseInt(
+        process.env.PERSONAL_KOI_INGEST_TIMEOUT || '120000', 10);
       const response = await this.client.post('/ingest', {
         document_rid: request.document_rid,
         content: request.content,
@@ -323,7 +329,7 @@ export class BackendClient {
         relationships: request.relationships || [],
         source: request.source || 'obsidian-vault',
         context: request.context,  // Pass context for Tier 1.5 resolution
-      });
+      }, { timeout: ingestTimeout });
 
       return response.data;
     } catch (e) {

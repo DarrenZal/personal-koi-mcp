@@ -2626,7 +2626,14 @@ Rules:
             isError: true,
           };
         }
-        const { data } = await client.post('/knowledge/episodes', body, { headers });
+        // Episode creation embeds every fact + new entity serially server-side
+        // and regularly exceeds the client's 30s default — and the server
+        // commits work even after the client aborts, so a timeout + retry
+        // duplicates facts. Give it a real budget.
+        const knowledgeTimeout = parseInt(
+          process.env.PERSONAL_KOI_KNOWLEDGE_TIMEOUT || '120000', 10);
+        const { data } = await client.post('/knowledge/episodes', body, {
+          headers, timeout: knowledgeTimeout });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
