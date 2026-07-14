@@ -747,12 +747,13 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'vault_write_note',
     description:
-      'Create or update an entity note in the bioregional knowledge vault. Use when learning about new entities. Include proper frontmatter with @type.',
+      'Create or update an entity note in the bioregional knowledge vault. Use when learning about new entities. Include proper frontmatter with @type — either inline in `content` or via the structured `frontmatter` object.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: "Relative path (e.g. 'People/New Person.md')" },
-        content: { type: 'string', description: 'Full markdown content including YAML frontmatter' },
+        path: { type: 'string', description: "Relative path; '.md' is appended automatically if omitted (e.g. 'People/New Person')" },
+        content: { type: 'string', description: 'Markdown body. May include an inline YAML frontmatter block; if `frontmatter` is also supplied it replaces/sets the block.' },
+        frontmatter: { type: 'object', additionalProperties: true, description: 'Optional structured YAML frontmatter as a JSON object. Prepended as a `---` block (or replaces an inline one in `content`).' },
       },
       required: ['path', 'content'],
     },
@@ -1840,13 +1841,29 @@ export async function handleKoiApiTool(
 
       case 'vault_write_note': {
         const notePath = args.path as string;
-        const noteContent = args.content as string;
+        const noteContent = (args.content as string) ?? '';
+        const frontmatter = args.frontmatter as Record<string, unknown> | undefined;
         try {
-          const fullPath = safeVaultPath(notePath);
+          // Always persist with a .md extension — callers routinely pass an
+          // extensionless vault path, and an extensionless file is invisible to
+          // Obsidian + the vault scanner (silent data loss).
+          const relPath = notePath.endsWith('.md') ? notePath : `${notePath}.md`;
+          const fullPath = safeVaultPath(relPath);
           const dir = path.dirname(fullPath);
           await fs.mkdir(dir, { recursive: true });
-          await fs.writeFile(fullPath, noteContent, 'utf-8');
-          return { content: [{ type: 'text', text: `Written: ${notePath}` }] };
+          // Honor an optional structured frontmatter object: prepend it as a
+          // YAML block, or replace an existing inline block in `content`.
+          let finalContent = noteContent;
+          if (frontmatter && Object.keys(frontmatter).length > 0) {
+            const fmBlock = `---\n${YAML.stringify(frontmatter)}---\n`;
+            if (noteContent.startsWith('---')) {
+              finalContent = noteContent.replace(/^---\s*\n[\s\S]*?\n---\n?/, fmBlock);
+            } else {
+              finalContent = fmBlock + (noteContent.startsWith('\n') ? noteContent.slice(1) : noteContent);
+            }
+          }
+          await fs.writeFile(fullPath, finalContent, 'utf-8');
+          return { content: [{ type: 'text', text: `Written: ${relPath}` }] };
         } catch (e: any) {
           return { content: [{ type: 'text', text: `Error writing ${notePath}: ${e.message}` }], isError: true };
         }
@@ -2602,7 +2619,14 @@ Rules:
         if (args.source_document) body.source_document = args.source_document;
         if (args.group_id) body.group_id = args.group_id;
         if (args.create_entities !== undefined) body.create_entities = args.create_entities;
-        const { data } = await client.post('/knowledge/episodes', body);
+        const headers = await getKoiServiceTokenHeaders();
+        if (!headers) {
+          return {
+            content: [{ type: 'text', text: 'add_knowledge requires the KOI service token. Set KOI_CLAIMS_SERVICE_TOKEN in the MCP env or write it to ~/.config/personal-koi/koi-state/claims_service_token.' }],
+            isError: true,
+          };
+        }
+        const { data } = await client.post('/knowledge/episodes', body, { headers });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

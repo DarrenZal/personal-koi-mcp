@@ -4633,6 +4633,30 @@ Your feedback helps improve KOI for everyone.${
           return `[[${folder}/${safeName}]]`;
         };
 
+        // Phantom-path guard: a wikilink whose target note does not exist on
+        // disk would dangle. Registry-only entities (canonical URI but no
+        // backing vault note — e.g. a bare "Kevin", or an orphaned mapping the
+        // backend's /resolve-to-vault now excludes) fall through getWikilink's
+        // synthetic fallback. We flag these so they are NOT presented as a
+        // confident "exact match". Mirrors backend _vault_note_exists +
+        // process-note Guard G.
+        const _fs = await import('fs');
+        const _path = await import('path');
+        const _vaultRoot = vault.getVaultPath();
+        const noteExistsOnDisk = (wikilink: string): boolean => {
+          const m = wikilink.match(/^\[\[([^\]|#]+)/);
+          if (!m) return false;
+          let rel = m[1].trim();
+          if (rel.endsWith('.md')) rel = rel.slice(0, -3);
+          try {
+            return _fs.existsSync(_path.join(_vaultRoot, rel + '.md'))
+              || _fs.existsSync(_path.join(_vaultRoot, rel));
+          } catch { return false; }
+        };
+        const phantomCount = response.canonical_entities.filter(
+          e => !e.is_new && !noteExistsOnDisk(getWikilink(e.uri, e.type, e.name))
+        ).length;
+
         // Format successful response
         let output = `# Entity Ingestion Results\n\n`;
         output += `**Document:** ${args.path}\n`;
@@ -4645,6 +4669,9 @@ Your feedback helps improve KOI for everyone.${
         output += `- Resolved to existing: ${response.stats.resolved_entities}\n`;
         output += `- Relationships: ${response.stats.relationships_processed}\n`;
         output += `- Vault paths resolved: ${vaultPathsResponse.resolved}/${vaultPathsResponse.total}\n`;
+        if (phantomCount > 0) {
+          output += `- ⚠️ Phantom resolutions (registry entity, no vault note on disk): ${phantomCount}\n`;
+        }
         if (contextualCandidates.length > 0) {
           output += `- Contextual candidates used: ${contextualCandidates.length}\n`;
         }
@@ -4672,6 +4699,12 @@ Your feedback helps improve KOI for everyone.${
           output += `### Resolved to Existing (${resolvedEntities.length})\n`;
           for (const entity of resolvedEntities) {
             const wikilink = getWikilink(entity.uri, entity.type, entity.name);
+            if (!noteExistsOnDisk(wikilink)) {
+              // Resolved-to-existing but the note is absent → phantom. Do NOT
+              // call this an "exact match"; surface for verify/create instead.
+              output += `- **${entity.name}** (${entity.type}) → ${wikilink} ⚠️ PHANTOM (registry entity, no vault note on disk — verify/create before linking)\n`;
+              continue;
+            }
             const status = entity.merged_with
               ? `merged from "${entity.merged_with}"`
               : `exact match`;
@@ -4696,13 +4729,12 @@ Your feedback helps improve KOI for everyone.${
         output += `|--------|----------|\n`;
         for (const entity of response.canonical_entities) {
           const wikilink = getWikilink(entity.uri, entity.type, entity.name);
-          // Add warning icon if this name has a suggested expansion from pre-flight check
+          // Warning icons: name has a suggested expansion from pre-flight check,
+          // and/or the resolved note is a phantom (no vault file on disk).
           const hasSuggestion = preFlightSuggestions.some(s => s.shortName === entity.name);
-          if (hasSuggestion) {
-            output += `| ${entity.name} ⚠️ | \`${wikilink}\` |\n`;
-          } else {
-            output += `| ${entity.name} | \`${wikilink}\` |\n`;
-          }
+          const phantom = !entity.is_new && !noteExistsOnDisk(wikilink);
+          const marks = `${hasSuggestion ? ' ⚠️' : ''}${phantom ? ' ⚠️ PHANTOM' : ''}`;
+          output += `| ${entity.name}${marks} | \`${wikilink}\` |\n`;
         }
 
         return {

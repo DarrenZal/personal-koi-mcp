@@ -300,14 +300,38 @@ export async function reloadEntityTypes(): Promise<EntityTypeConfig[]> {
 }
 
 /**
+ * schema.org-style / ontology variant type keys → canonical vault folder.
+ * Mirrors the vault Ontology.md: software apps, ideas, defined terms and tools
+ * all live under Concepts/; schema:Place lives under Locations/. Without this,
+ * an unmapped type like "schema:SoftwareApplication" fell through to the
+ * `${typeKey}s` fallback and produced the malformed folder
+ * "schema:SoftwareApplications/" (the recurring phantom-vault-path class).
+ */
+const TYPE_FOLDER_ALIASES: Record<string, string> = {
+  softwareapplication: 'Concepts',
+  idea: 'Concepts',
+  definedterm: 'Concepts',
+  tool: 'Concepts',
+  place: 'Locations',
+};
+
+/** Strip a leading namespace prefix, e.g. "schema:SoftwareApplication" → "SoftwareApplication". */
+function normalizeTypeKey(typeKey: string): string {
+  return typeKey.includes(':') ? typeKey.split(':').pop()!.trim() : typeKey.trim();
+}
+
+/**
  * Map entity type to vault folder (async).
  */
 export async function typeToFolder(typeKey: string): Promise<string> {
   const types = await getEntityTypes();
+  const norm = normalizeTypeKey(typeKey);
   const found = types.find(
-    t => t.type_key === typeKey || t.type_key.toLowerCase() === typeKey.toLowerCase()
+    t => t.type_key === norm || t.type_key.toLowerCase() === norm.toLowerCase()
   );
-  return found?.folder || `${typeKey}s`; // Fallback: append 's'
+  // Safe catch-all is Concepts/ (the ontology's bucket for ideas/terms/tools/software),
+  // never `${typeKey}s` which produced colon-bearing folder names.
+  return found?.folder || TYPE_FOLDER_ALIASES[norm.toLowerCase()] || 'Concepts';
 }
 
 /**
@@ -379,7 +403,10 @@ export function typeToFolderSync(typeKey: string): string {
       DEFAULT_ENTITY_TYPES.map(t => [t.type_key.toLowerCase(), t.folder])
     );
   }
-  return _typeToFolderMap.get(typeKey.toLowerCase()) || `${typeKey}s`;
+  const norm = normalizeTypeKey(typeKey).toLowerCase();
+  // Safe catch-all is Concepts/ (never `${typeKey}s`, which produced malformed
+  // colon-bearing folders like "schema:SoftwareApplications/").
+  return _typeToFolderMap.get(norm) || TYPE_FOLDER_ALIASES[norm] || 'Concepts';
 }
 
 /**
