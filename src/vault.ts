@@ -125,7 +125,10 @@ export function parseFrontmatter(content: string): ParsedNote {
  * Generate YAML frontmatter string from object
  */
 export function generateFrontmatter(data: Record<string, any>): string {
-  return `---\n${yaml.stringify(data)}---\n`;
+  // lineWidth: 0 (unlimited) — the default 80-col fold wraps long wikilink
+  // strings onto continuation lines, which breaks [[...]] links in
+  // mentionedIn arrays and produces false dangling-link positives.
+  return `---\n${yaml.stringify(data, { lineWidth: 0 })}---\n`;
 }
 
 /**
