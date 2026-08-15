@@ -210,7 +210,10 @@ export async function writeNote(
     // Check if content already has frontmatter
     if (content.startsWith('---')) {
       // Replace existing frontmatter
-      finalContent = content.replace(/^---\s*\n[\s\S]*?\n---\n?/, fm);
+      // Function replacement so `fm` is inserted LITERALLY. Passed as a string it is a
+      // replacement TEMPLATE: "$&", "$'", "$`" and "$$" inside any frontmatter value are
+      // expanded by String.replace, and "$'" splices the whole note body into a value.
+      finalContent = content.replace(/^---\s*\n[\s\S]*?\n---\n?/, () => fm);
     } else {
       finalContent = fm + '\n' + content;
     }

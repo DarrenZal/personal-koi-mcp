@@ -807,6 +807,34 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
     },
   },
   {
+    name: 'discourse_search',
+    description:
+      'Retrieve scientific discourse moves (claims / evidence / counterpoints / theses / premises / implications / definitions / open-questions) extracted from ingested papers, with a clickable source link and the one-hop resolves-edge to the parent move they address. LEXICAL match over move title+detail (no semantic/embeddings in v1). Use to ask "what claims/evidence/counterpoints exist about X" or "show the argument structure of paper Y" (filter by document_rid). Omit query to browse most-recent moves.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Lexical keywords matched over move title+detail. Omit to browse most-recent moves.',
+        },
+        move_type: {
+          type: 'array',
+          items: { type: 'string' },
+          description: "Filter by move_type(s): claim, evidence, thesis, counterpoint, premise, implication, definition, open_question.",
+        },
+        document_rid: {
+          type: 'string',
+          description: "Restrict to one document's argument structure (a document:<sha> rid).",
+        },
+        status: {
+          type: 'string',
+          description: 'Filter by move status (e.g. asserted, contested, open, deferred, supported, speculative).',
+        },
+        limit: { type: 'number', description: 'Max moves (default 20, max 100)' },
+      },
+    },
+  },
+  {
     name: 'calendar_events_by_date',
     description:
       "Return calendar events (from email-ingested ICS invites) within a date range. Use for 'do I have meetings on Friday?' style queries. Events returned are those whose dtstart falls inside [from_iso, to_iso). V1 source is fixed to ics-event (Proton/Gmail email-derived). Returns structured events with dtstart/dtend (UTC ISO 8601), location, attendees, organizer.",
@@ -1855,9 +1883,18 @@ export async function handleKoiApiTool(
           // YAML block, or replace an existing inline block in `content`.
           let finalContent = noteContent;
           if (frontmatter && Object.keys(frontmatter).length > 0) {
-            const fmBlock = `---\n${YAML.stringify(frontmatter)}---\n`;
+            // lineWidth: 0 (unlimited). The default 80-column fold splits a long
+            // "[[wikilink]]" across two physical lines: still valid YAML, but no longer
+            // a scannable wikilink, so Obsidian's backlink pane and every wikilink
+            // consumer stops resolving it. src/vault.ts:131 already passes this; the
+            // live write path did not.
+            const fmBlock = `---\n${YAML.stringify(frontmatter, { lineWidth: 0 })}---\n`;
             if (noteContent.startsWith('---')) {
-              finalContent = noteContent.replace(/^---\s*\n[\s\S]*?\n---\n?/, fmBlock);
+              // Replace via a function so fmBlock is inserted LITERALLY. As a string it
+              // is a replacement TEMPLATE, and "$&", "$'", "$`" or "$$" appearing inside
+              // any frontmatter value would be expanded by String.replace -- "$'"
+              // splices the entire note body into a YAML value.
+              finalContent = noteContent.replace(/^---\s*\n[\s\S]*?\n---\n?/, () => fmBlock);
             } else {
               finalContent = fmBlock + (noteContent.startsWith('\n') ? noteContent.slice(1) : noteContent);
             }
@@ -1900,6 +1937,33 @@ export async function handleKoiApiTool(
         };
         if (args.source) body.source = args.source;
         const { data } = await client.post('/search', body);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'discourse_search': {
+        // Build the query string manually so a move_type array serializes to
+        // REPEATED params (?move_type=claim&move_type=evidence) — the form the
+        // FastAPI endpoint parses natively (axios default would bracket them).
+        const qs = new URLSearchParams();
+        if (args.query !== undefined && args.query !== null && String(args.query).length > 0) {
+          qs.append('query', String(args.query));
+        }
+        const moveTypes = args.move_type;
+        if (Array.isArray(moveTypes)) {
+          for (const mt of moveTypes) {
+            if (mt !== undefined && mt !== null && String(mt).length > 0) {
+              qs.append('move_type', String(mt));
+            }
+          }
+        } else if (typeof moveTypes === 'string' && moveTypes.length > 0) {
+          qs.append('move_type', moveTypes);
+        }
+        if (args.document_rid) qs.append('document_rid', String(args.document_rid));
+        if (args.status) qs.append('status', String(args.status));
+        if (args.limit !== undefined && args.limit !== null) {
+          qs.append('limit', String(args.limit));
+        }
+        const { data } = await client.get(`/knowledge/discourse-search?${qs.toString()}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
