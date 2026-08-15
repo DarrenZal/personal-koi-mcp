@@ -420,7 +420,7 @@ class KOIServer {
             result = await this.vaultReadNote(args as { path: string });
             break;
           case 'vault_write_note':
-            result = await this.vaultWriteNote(args as { path: string; content: string; frontmatter?: Record<string, any>; backup?: boolean });
+            result = await this.vaultWriteNote(args as { path: string; content: string; frontmatter?: Record<string, any>; backup?: boolean; clearFrontmatter?: boolean });
             break;
           case 'vault_list_notes':
             result = await this.vaultListNotes(args as { folder?: string; entityType?: string; limit?: number });
@@ -3737,6 +3737,7 @@ Your feedback helps improve KOI for everyone.${
     content: string;
     frontmatter?: Record<string, any>;
     backup?: boolean;
+    clearFrontmatter?: boolean;
   }): Promise<{ content: Array<{ type: string; text: string }> }> {
     try {
       // Backup vault before making changes (default: true)
@@ -3750,13 +3751,18 @@ Your feedback helps improve KOI for everyone.${
         }
       }
 
-      const result = await vault.writeNote(args.path, args.content, args.frontmatter);
+      const result = await vault.writeNote(args.path, args.content, args.frontmatter, {
+        clearFrontmatter: args.clearFrontmatter
+      });
 
       if (result.success) {
+        // Surface how the frontmatter was resolved. 'prepended' with a supplied
+        // frontmatter object means no valid existing block was found -- the case
+        // the old code turned into a silent, success-reporting no-op.
         return {
           content: [{
             type: 'text',
-            text: `Note written successfully: ${result.path}${backupInfo}`
+            text: `Note written successfully: ${result.path}${backupInfo} (frontmatter: ${result.frontmatterMode})`
           }]
         };
       } else {

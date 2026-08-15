@@ -8,6 +8,13 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import { getEntityTypes, folderToTypeSync, getAllEntityFoldersSync, prefetchEntityTypes } from './entity-schema.js';
+import {
+  applyFrontmatterBlock,
+  findFrontmatterBlock,
+  type FrontmatterMode
+} from './frontmatter.js';
+
+export type { FrontmatterMode } from './frontmatter.js';
 
 // Default vault path - VAULT_PATH is primary, OBSIDIAN_VAULT_PATH is fallback
 const DEFAULT_VAULT_PATH = process.env.VAULT_PATH || process.env.OBSIDIAN_VAULT_PATH ||
@@ -176,14 +183,33 @@ export async function readNote(notePath: string): Promise<{
   }
 }
 
+export interface WriteNoteOptions {
+  /**
+   * Content-only writes preserve the note's existing frontmatter by default.
+   * Set this to drop it on purpose; the result reports mode 'cleared'.
+   */
+  clearFrontmatter?: boolean;
+}
+
 /**
- * Write a note to the vault
+ * Write a note to the vault.
+ *
+ * Frontmatter contract:
+ *  - `frontmatter` given      -> replaces a valid existing block, else prepends.
+ *                                Never silently discarded.
+ *  - `frontmatter` omitted    -> if `content` carries its own block, that block
+ *                                is authoritative ('unchanged'); otherwise the
+ *                                file's existing block is carried over verbatim
+ *                                ('preserved') unless `clearFrontmatter` is set.
+ *
+ * The outcome is always reported in `frontmatterMode`.
  */
 export async function writeNote(
   notePath: string,
   content: string,
-  frontmatter?: Record<string, any>
-): Promise<{ success: boolean; path: string; error?: string }> {
+  frontmatter?: Record<string, any>,
+  options?: WriteNoteOptions
+): Promise<{ success: boolean; path: string; error?: string; frontmatterMode: FrontmatterMode }> {
   const vaultPath = getVaultPath();
 
   // Normalize path
@@ -205,25 +231,48 @@ export async function writeNote(
 
   // Build content
   let finalContent = content;
+  let frontmatterMode: FrontmatterMode = 'unchanged';
+
   if (frontmatter) {
+    // Caller supplied frontmatter: it wins. It is either spliced over a valid
+    // existing block or prepended -- there is no path on which it is dropped,
+    // and which one happened is reported back in `frontmatterMode`.
     const fm = generateFrontmatter(frontmatter);
-    // Check if content already has frontmatter
-    if (content.startsWith('---')) {
-      // Replace existing frontmatter
-      // Function replacement so `fm` is inserted LITERALLY. Passed as a string it is a
-      // replacement TEMPLATE: "$&", "$'", "$`" and "$$" inside any frontmatter value are
-      // expanded by String.replace, and "$'" splices the whole note body into a value.
-      finalContent = content.replace(/^---\s*\n[\s\S]*?\n---\n?/, () => fm);
-    } else {
-      finalContent = fm + '\n' + content;
+    const applied = applyFrontmatterBlock(content, fm, { separator: '\n' });
+    finalContent = applied.text;
+    frontmatterMode = applied.mode;
+  } else if (options?.clearFrontmatter) {
+    // Explicit, opt-in destruction. Never the default.
+    frontmatterMode = 'cleared';
+  } else if (!findFrontmatterBlock(content)) {
+    // Content-only write whose content carries no frontmatter of its own. The
+    // old code wrote it straight out, which DELETED the note's frontmatter and
+    // reported success (the 2026-08-07 incident). Carry the existing block over
+    // verbatim -- verbatim so key order and non-ASCII are untouched.
+    try {
+      const existing = await fs.readFile(fullPath, 'utf-8');
+      const block = findFrontmatterBlock(existing);
+      if (block) {
+        const fm = block.raw.endsWith('\n') ? block.raw : block.raw + '\n';
+        // Idempotency: the body handed back by a caller that stripped the block
+        // already begins with the newline that followed it, so an unconditional
+        // separator adds one blank line per write cycle (measured 53->54->55->56->57
+        // bytes over five round trips). Only insert a separator when there isn't one.
+        finalContent = fm + (/^\r?\n/.test(content) ? '' : '\n') + content;
+        frontmatterMode = 'preserved';
+      }
+    } catch (e) {
+      // No existing file (or unreadable): nothing to preserve.
     }
   }
+  // else: content already carries its own frontmatter block and the caller
+  // supplied none, so the content is authoritative -> 'unchanged'.
 
   try {
     await fs.writeFile(fullPath, finalContent, 'utf-8');
-    return { success: true, path: fullPath };
+    return { success: true, path: fullPath, frontmatterMode };
   } catch (e: any) {
-    return { success: false, path: fullPath, error: e.message };
+    return { success: false, path: fullPath, error: e.message, frontmatterMode };
   }
 }
 

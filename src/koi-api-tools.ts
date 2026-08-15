@@ -17,6 +17,11 @@ import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import YAML from 'yaml';
 import { RECALL_TOOL_DEFINITION, handleRecallTool } from './tools/recall.js';
+import {
+  applyFrontmatterBlock,
+  findFrontmatterBlock,
+  type FrontmatterMode
+} from './frontmatter.js';
 
 // =============================================================================
 // Client setup
@@ -747,13 +752,14 @@ export const KOI_API_TOOL_DEFINITIONS: Tool[] = [
   {
     name: 'vault_write_note',
     description:
-      'Create or update an entity note in the bioregional knowledge vault. Use when learning about new entities. Include proper frontmatter with @type — either inline in `content` or via the structured `frontmatter` object.',
+      'Create or update an entity note in the bioregional knowledge vault. Use when learning about new entities. Include proper frontmatter with @type — either inline in `content` or via the structured `frontmatter` object. A content-only write keeps the existing frontmatter; the response reports which of replaced/prepended/preserved/cleared/unchanged happened.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: "Relative path; '.md' is appended automatically if omitted (e.g. 'People/New Person')" },
         content: { type: 'string', description: 'Markdown body. May include an inline YAML frontmatter block; if `frontmatter` is also supplied it replaces/sets the block.' },
         frontmatter: { type: 'object', additionalProperties: true, description: 'Optional structured YAML frontmatter as a JSON object. Prepended as a `---` block (or replaces an inline one in `content`).' },
+        clearFrontmatter: { type: 'boolean', description: "Content-only writes PRESERVE the note's existing frontmatter by default. Set true to delete it on purpose." },
       },
       required: ['path', 'content'],
     },
@@ -1871,6 +1877,7 @@ export async function handleKoiApiTool(
         const notePath = args.path as string;
         const noteContent = (args.content as string) ?? '';
         const frontmatter = args.frontmatter as Record<string, unknown> | undefined;
+        const clearFrontmatter = args.clearFrontmatter === true;
         try {
           // Always persist with a .md extension — callers routinely pass an
           // extensionless vault path, and an extensionless file is invisible to
@@ -1882,6 +1889,8 @@ export async function handleKoiApiTool(
           // Honor an optional structured frontmatter object: prepend it as a
           // YAML block, or replace an existing inline block in `content`.
           let finalContent = noteContent;
+          let frontmatterMode: FrontmatterMode = 'unchanged';
+
           if (frontmatter && Object.keys(frontmatter).length > 0) {
             // lineWidth: 0 (unlimited). The default 80-column fold splits a long
             // "[[wikilink]]" across two physical lines: still valid YAML, but no longer
@@ -1889,18 +1898,46 @@ export async function handleKoiApiTool(
             // consumer stops resolving it. src/vault.ts:131 already passes this; the
             // live write path did not.
             const fmBlock = `---\n${YAML.stringify(frontmatter, { lineWidth: 0 })}---\n`;
-            if (noteContent.startsWith('---')) {
-              // Replace via a function so fmBlock is inserted LITERALLY. As a string it
-              // is a replacement TEMPLATE, and "$&", "$'", "$`" or "$$" appearing inside
-              // any frontmatter value would be expanded by String.replace -- "$'"
-              // splices the entire note body into a YAML value.
-              finalContent = noteContent.replace(/^---\s*\n[\s\S]*?\n---\n?/, () => fmBlock);
-            } else {
-              finalContent = fmBlock + (noteContent.startsWith('\n') ? noteContent.slice(1) : noteContent);
+            // Splice by slice against a LINE-ANCHORED, yaml-validated boundary.
+            // The old `content.startsWith('---')` + lazy-regex pair could (a)
+            // silently discard fmBlock when the regex missed, (b) eat the body of
+            // a note that merely opened with a horizontal rule, and (c) accept
+            // "--- END OF TRANSCRIPT ---" as the closing fence.
+            const applied = applyFrontmatterBlock(noteContent, fmBlock, {
+              separator: '',
+              stripLeadingNewline: true,
+            });
+            finalContent = applied.text;
+            frontmatterMode = applied.mode;
+          } else if (clearFrontmatter) {
+            // Explicit, opt-in destruction. Never the default.
+            frontmatterMode = 'cleared';
+          } else if (!findFrontmatterBlock(noteContent)) {
+            // Content-only write with no frontmatter of its own: preserve the
+            // file's existing block verbatim instead of deleting it and
+            // reporting success (the 2026-08-07 incident).
+            try {
+              const existing = await fs.readFile(fullPath, 'utf-8');
+              const block = findFrontmatterBlock(existing);
+              if (block) {
+                const fmBlock = block.raw.endsWith('\n') ? block.raw : `${block.raw}\n`;
+                // Concatenate verbatim. A caller that stripped the block hands back a
+                // body still carrying the newline that followed it, so this round-trips
+                // byte-exactly and is idempotent. Slicing a leading newline off (as this
+                // did) silently eats the blank line between frontmatter and body on every
+                // write; adding one unconditionally (as vault.ts did) grows the file by a
+                // line per cycle — measured 53->54->55->56->57 bytes over five round
+                // trips. The separator is only needed when the body has none of its own.
+                finalContent = fmBlock + (/^\r?\n/.test(noteContent) ? '' : '\n') + noteContent;
+                frontmatterMode = 'preserved';
+              }
+            } catch {
+              // No existing file (or unreadable): nothing to preserve.
             }
           }
+
           await fs.writeFile(fullPath, finalContent, 'utf-8');
-          return { content: [{ type: 'text', text: `Written: ${relPath}` }] };
+          return { content: [{ type: 'text', text: `Written: ${relPath} (frontmatter: ${frontmatterMode})` }] };
         } catch (e: any) {
           return { content: [{ type: 'text', text: `Error writing ${notePath}: ${e.message}` }], isError: true };
         }

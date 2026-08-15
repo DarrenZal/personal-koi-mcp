@@ -564,8 +564,12 @@ Example paths:
     name: 'vault_write_note',
     description: `Create or update a note in your local Obsidian vault.
 
-Can write content with optional YAML frontmatter. If frontmatter is provided and the note
-already has frontmatter, it will be merged/replaced.
+Frontmatter handling:
+- If \`frontmatter\` is provided, it replaces the note's existing frontmatter block, or is
+  prepended when there is none. It is never dropped.
+- If \`frontmatter\` is omitted and \`content\` contains no frontmatter of its own, the file's
+  existing frontmatter is PRESERVED. Pass clearFrontmatter=true to remove it deliberately.
+The response reports which of replaced / prepended / preserved / cleared / unchanged happened.
 
 Example:
   vault_write_note(
@@ -593,6 +597,10 @@ Example:
           type: 'boolean',
           description: 'Commit vault to git before making changes (default: true)',
           default: true
+        },
+        clearFrontmatter: {
+          type: 'boolean',
+          description: "Content-only writes preserve the note's existing frontmatter by default. Set true to delete it on purpose."
         }
       },
       required: ['path', 'content']
